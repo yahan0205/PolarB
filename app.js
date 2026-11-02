@@ -1560,9 +1560,10 @@ function drawCaseRosterTable(box, data) {
       <tbody>${shown.map(({ c, r, st }) => {
         // 「最近一次家訪」要顯示實際上一次合格家訪的日期（r.lastHomeMonth），不是目前月份的到期狀態
         // ——目前月份狀態（達標/未到期/逾期）另外用小標籤附加在日期後面，不能取代日期本身。
+        // 逾期標籤用 position:absolute 靠右貼齊，脫離文字排版流程，讓日期本身不管有沒有標籤都維持置中。
         const homeCell = !audit.logMinMonth ? '<span class="faint">尚無訪視紀錄</span>'
           : !r ? '<span class="faint">—</span>'
-          : r.lastHomeDate ? `${fmtDate(r.lastHomeDate)}${st?.家訪 === '逾期' ? ' <span class="st r-拒絕">逾期</span>' : ''}`
+          : r.lastHomeDate ? `${fmtDate(r.lastHomeDate)}${st?.家訪 === '逾期' ? '<span class="st r-拒絕" style="position:absolute;right:8px;top:50%;transform:translateY(-50%)">逾期</span>' : ''}`
           : st?.家訪 === '資料不足' ? '<span class="chip">尚無訪視歷史</span>'
           : '<span class="st r-拒絕">未收案家訪</span>';
         const nextDueCell = !audit.logMinMonth || !r ? '<span class="faint">—</span>' : esc(r.nextDue);
@@ -1583,7 +1584,7 @@ function drawCaseRosterTable(box, data) {
           <td class="nowrap">${fmtDate(c.service_start_date)}</td>
           <td class="nowrap">${fmtDate(c.end_date)}</td>
           <td>${esc(c.status)}</td>
-          <td class="nowrap">${homeCell}</td>
+          <td class="nowrap" style="position:relative">${homeCell}</td>
           <td class="nowrap small">${nextDueCell}</td>
           <td class="nowrap">${phoneCell}</td>
           <td class="nowrap">${fileCell}</td>
