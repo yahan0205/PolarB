@@ -1546,7 +1546,13 @@ function drawCaseRosterTable(box, data) {
       <input type="search" class="grow" id="rfQ" placeholder="搜尋案號、姓名、身分證字號、督導員（含已離職）" value="${esc(caseRosterState.q)}">
     </div>
     <div class="muted small" style="margin-bottom:8px">共 ${shown.length} 筆${roster.length ? '' : '（個案清單還沒有資料，請管理者到下方「重新整理個案清單」匯入）'}</div>
-    <div class="tbox"><table class="t"><thead><tr>
+    <div class="tbox"><table class="t roster">
+      <colgroup>
+        <col style="width:90px"><col style="width:80px"><col style="width:110px"><col style="width:80px">
+        <col style="width:100px"><col style="width:100px"><col style="width:100px"><col style="width:70px">
+        <col style="width:130px"><col style="width:100px"><col style="width:120px"><col style="width:90px">
+      </colgroup>
+      <thead><tr>
       <th id="th-caseno" style="cursor:pointer;user-select:none" title="點擊排序">案號 ${sortIcon('case_no')}</th>
       <th>姓名</th><th>身分證字號</th><th>督導員</th><th>A單位名稱</th>
       <th id="th-startdate" style="cursor:pointer;user-select:none" title="點擊排序">開始服務日 ${sortIcon('service_start_date')}</th>

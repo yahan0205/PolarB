@@ -93,6 +93,8 @@ table.t td.num, table.t th.num { text-align: right; font-variant-numeric: tabula
 .nowrap { white-space: nowrap; }
 .sub { font-size: 12px; color: var(--muted); }
 .ellip { display: inline-block; max-width: 160px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
+/* 個案清單：欄寬用 <col> 給建議寬度（auto 版面下是最小值，不是上限，長內容仍會自動撐開、不會被截斷），文字置中對齊。 */
+table.t.roster th, table.t.roster td { text-align: center; vertical-align: middle; }
 
 /* chips & badges */
 .chip { display: inline-block; font-size: 12px; padding: 2px 8px; border-radius: 999px; background: var(--cond-bg); color: var(--cond); white-space: nowrap; margin: 0 4px 4px 0; }
