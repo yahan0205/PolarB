@@ -1114,11 +1114,14 @@ function auditCases(casesByNid, records, asOfMonth) {
       ...months.filter((m) => log.homeBlank.has(m) && !log.home.has(m)),
     ];
 
+    // lastHomeMonth 可能是 auditStart 之前的月份（資料範圍起點前就有的訪視，用來起算到期日），
+    // 這種情況下 monthStatus 裡不會有這個月份的資料；日期另外從 log.home 直接取，確保永遠拿得到。
+    const lastHomeDate = lastHomeMonth ? log.home.get(lastHomeMonth) : null;
     results.set(nid, {
       nationalId: nid, name, owner, caseNo: (info && info.case_no) || '',
       status: statusNow, inRoster: !!info,
       caseStartMonth: caseStartMonth || '未知', auditStart,
-      preWindow, lastHomeMonth, nextDue,
+      preWindow, lastHomeMonth, lastHomeDate, nextDue,
       monthStatus, months, blankMonths, caseEndMonth,
     });
   }
@@ -1549,13 +1552,13 @@ function drawCaseRosterTable(box, data) {
       <th id="th-startdate" style="cursor:pointer;user-select:none" title="點擊排序">開始服務日 ${sortIcon('service_start_date')}</th>
       <th>結案日</th><th>狀態</th><th>最近一次家訪</th><th>下次應家訪日</th><th>最近一次電訪</th><th>案本</th></tr></thead>
       <tbody>${shown.map(({ c, r, st }) => {
+        // 「最近一次家訪」要顯示實際上一次合格家訪的日期（r.lastHomeMonth），不是目前月份的到期狀態
+        // ——目前月份狀態（達標/未到期/逾期）另外用小標籤附加在日期後面，不能取代日期本身。
         const homeCell = !audit.logMinMonth ? '<span class="faint">尚無訪視紀錄</span>'
-          : !st ? '<span class="faint">—</span>'
-          : st.家訪 === '達標' ? fmtDate(st.家訪日期)
-          : st.家訪 === '逾期' ? '<span class="st r-拒絕">逾期</span>'
-          : st.家訪 === '缺漏(未收案家訪)' ? '<span class="st r-拒絕">未收案家訪</span>'
-          : st.家訪 === '資料不足' ? '<span class="chip">尚無訪視歷史</span>'
-          : '<span class="faint">未到期</span>';
+          : !r ? '<span class="faint">—</span>'
+          : r.lastHomeDate ? `${fmtDate(r.lastHomeDate)}${st?.家訪 === '逾期' ? ' <span class="st r-拒絕">逾期</span>' : ''}`
+          : st?.家訪 === '資料不足' ? '<span class="chip">尚無訪視歷史</span>'
+          : '<span class="st r-拒絕">未收案家訪</span>';
         const nextDueCell = !audit.logMinMonth || !r ? '<span class="faint">—</span>' : esc(r.nextDue);
         const phoneCell = !audit.logMinMonth ? '<span class="faint">尚無訪視紀錄</span>'
           : !st ? '<span class="faint">—</span>'
