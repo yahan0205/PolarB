@@ -9,7 +9,7 @@
 [hidden] { display: none !important; }
 html, body { margin: 0; background: var(--ground); color: var(--ink); font-family: 'Noto Sans TC', system-ui, sans-serif; font-size: 15px; }
 a { color: var(--accent); } a:hover { color: var(--accent-d); }
-.wrap { max-width: 1600px; margin: 0 auto; padding: 0 20px; }
+.wrap { max-width: 100%; margin: 0 auto; padding: 0 32px; }
 main.wrap { padding-top: 24px; padding-bottom: 60px; }
 .muted { color: var(--muted); } .faint { color: var(--faint); } .small { font-size: 13px; }
 h1 { font-size: 24px; margin: 0; } h2 { font-size: 17px; margin: 0; }
