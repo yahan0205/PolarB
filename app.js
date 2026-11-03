@@ -1458,10 +1458,11 @@ function makeUnitLabelResolver(abbrs, referralUnits) {
 }
 
 async function loadCaseRosterAudit() {
-  const [roster, visitBatches, abbrs] = await Promise.all([
+  const [roster, visitBatches, abbrs, confirmedInquiries] = await Promise.all([
     db.all('case_roster', {}),
     db.all('rk_visit_imports', { order: 'imported_at.desc' }),
     db.all('unit_abbrs', {}),
+    db.all('inquiries', { status: 'eq.成案', select: 'lead_staff_id,contract_date' }),
   ]);
   const casesByNid = {};
   for (const c of roster) if (c.national_id) casesByNid[c.national_id] = c;
@@ -1473,7 +1474,14 @@ async function loadCaseRosterAudit() {
   const asOfMonth = logMonths.length ? [...logMonths, todayMonth].reduce((a, b) => (a > b ? a : b)) : todayMonth;
   const audit = effective.length ? auditCases(casesByNid, effective, asOfMonth) : { results: new Map(), logMinMonth: null, logMaxMonth: null, excludedCount: 0 };
   const latestVisitImportAt = visitBatches[0]?.imported_at || null;
-  return { roster, casesByNid, audit, unitLabel, latestVisitImportAt };
+  // 「當月新案」來源是問案功能（不是個案清單）：成案且簽約日落在本月的筆數，依主責督導歸戶。
+  const newCaseCountByName = {};
+  for (const r of confirmedInquiries) {
+    if (!r.lead_staff_id || !r.contract_date || r.contract_date.slice(0, 7) !== todayMonth) continue;
+    const name = L.staffById[r.lead_staff_id]?.name;
+    if (name) newCaseCountByName[name] = (newCaseCountByName[name] || 0) + 1;
+  }
+  return { roster, casesByNid, audit, unitLabel, latestVisitImportAt, newCaseCountByName };
 }
 
 async function viewCases() {
@@ -1488,7 +1496,7 @@ async function viewCases() {
 
 const caseRosterState = { owner: '全部', unit: '全部', status: '全部', onlyIssues: false, q: '', sortBy: null, sortDir: 'asc', statsCollapsed: false };
 function drawCaseRosterTable(box, data) {
-  const { roster, casesByNid, audit, unitLabel, latestVisitImportAt } = data;
+  const { roster, casesByNid, audit, unitLabel, latestVisitImportAt, newCaseCountByName } = data;
   const activeStaffNames = new Set(L.staff.filter((s) => s.active).map((s) => s.name));
   // 督導下拉只留目前在職的人；已離職的督導要找，用搜尋框手動打名字（搜尋框有涵蓋督導員欄位，見下方 q 篩選）。
   const owners = [...new Set(roster.map((c) => c.lead_supervisor).filter(Boolean))].filter((o) => activeStaffNames.has(o)).sort();
@@ -1509,7 +1517,7 @@ function drawCaseRosterTable(box, data) {
   });
   const myCases = roster.filter((c) => c.lead_supervisor === me.name);
   const myStats = computeStats(myCases);
-  const bySupervisor = owners.map((o) => ({ owner: o, ...computeStats(roster.filter((c) => c.lead_supervisor === o)) }));
+  const bySupervisor = owners.map((o) => ({ owner: o, newThisMonth: newCaseCountByName[o] || 0, ...computeStats(roster.filter((c) => c.lead_supervisor === o)) }));
   const draw = () => {
     const q = caseRosterState.q.trim().toLowerCase();
     const filtered = roster.filter((c) => (caseRosterState.owner === '全部' || c.lead_supervisor === caseRosterState.owner)
@@ -1548,8 +1556,8 @@ function drawCaseRosterTable(box, data) {
         <div class="small muted" style="margin-left:auto">訪視紀錄資料更新於 ${latestVisitImportAt ? fmtTime(latestVisitImportAt) : '尚無匯入紀錄'}</div>
         <button type="button" class="btn small" id="statsToggle" title="${caseRosterState.statsCollapsed ? '展開' : '縮小'}" style="min-height:auto;padding:2px 10px;font-size:16px;line-height:1">${caseRosterState.statsCollapsed ? '+' : '−'}</button>
       </div>
-      ${caseRosterState.statsCollapsed ? '' : `<div class="tbox"><table class="t"><thead><tr><th>督導</th><th class="num">列管個案數</th><th class="num">家訪逾期</th><th class="num">本月電訪缺漏</th><th class="num">案本未繳交</th></tr></thead>
-        <tbody>${bySupervisor.map((s) => `<tr${s.owner === me.name ? ' style="background:var(--accent-l)"' : ''}><td>${esc(s.owner)}</td><td class="num">${s.total}</td><td class="num">${s.homeOverdue}</td><td class="num">${s.phoneMissing}</td><td class="num">${s.fileMissing}</td></tr>`).join('') || '<tr><td colspan="5" class="empty">無資料</td></tr>'}</tbody></table></div>`}
+      ${caseRosterState.statsCollapsed ? '' : `<div class="tbox"><table class="t"><thead><tr><th>督導</th><th class="num">當月新案</th><th class="num">列管個案數</th><th class="num">家訪逾期</th><th class="num">本月電訪缺漏</th><th class="num">案本未繳交</th></tr></thead>
+        <tbody>${bySupervisor.map((s) => `<tr${s.owner === me.name ? ' style="background:var(--accent-l)"' : ''}><td>${esc(s.owner)}</td><td class="num">${s.newThisMonth}</td><td class="num">${s.total}</td><td class="num">${s.homeOverdue}</td><td class="num">${s.phoneMissing}</td><td class="num">${s.fileMissing}</td></tr>`).join('') || '<tr><td colspan="6" class="empty">無資料</td></tr>'}</tbody></table></div>`}
     </div>`}
     ${!roster.length ? '' : (!audit.logMinMonth ? '<p class="small muted">還沒有匯入過訪視紀錄總表，「最近一次家訪／電訪」欄位暫時顯示尚無資料。到「個案比對」頁面的「家電訪稽核」頁籤可以匯入。</p>'
       : `<p class="small muted">訪視紀錄自 <strong>${audit.logMinMonth}</strong> 起開始匯入；此前月份不列入缺漏統計。</p>`)}
