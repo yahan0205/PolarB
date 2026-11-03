@@ -1495,18 +1495,22 @@ function drawCaseRosterTable(box, data) {
   const units = [...new Set(roster.map((c) => c.unit_name).filter(Boolean))].sort();
   const rowIssue = (st) => !!st && (st.家訪 === '逾期' || st.家訪 === '缺漏(未收案家訪)' || st.電訪 === '缺漏');
   const sortIcon = (field) => caseRosterState.sortBy === field ? `<span class="small muted">${caseRosterState.sortDir === 'asc' ? '▲' : '▼'}</span>` : '';
-  // 頁面最上方的家電訪統計摘要：不受下方篩選影響，永遠是全體個案清單的總覽。
+  // 頁面最上方的家電訪統計摘要：不受下方篩選影響，永遠是（全體／個人／各督導）總覽，三種互相獨立。
   const lastStatusOf = (c) => {
     const r = c.national_id ? audit.results.get(c.national_id) : null;
     const lastMonth = r ? r.months[r.months.length - 1] : null;
     return lastMonth ? r.monthStatus[lastMonth] : null;
   };
-  const summary = {
-    total: roster.length,
-    homeOverdue: roster.filter((c) => lastStatusOf(c)?.家訪 === '逾期').length,
-    phoneMissing: roster.filter((c) => lastStatusOf(c)?.電訪 === '缺漏').length,
-    fileMissing: roster.filter((c) => !c.file_status).length,
-  };
+  const computeStats = (cases) => ({
+    total: cases.length,
+    homeOverdue: cases.filter((c) => lastStatusOf(c)?.家訪 === '逾期').length,
+    phoneMissing: cases.filter((c) => lastStatusOf(c)?.電訪 === '缺漏').length,
+    fileMissing: cases.filter((c) => !c.file_status).length,
+  });
+  const summary = computeStats(roster);
+  const myCases = roster.filter((c) => c.lead_supervisor === me.name);
+  const myStats = computeStats(myCases);
+  const bySupervisor = owners.map((o) => ({ owner: o, ...computeStats(roster.filter((c) => c.lead_supervisor === o)) }));
   const draw = () => {
     const q = caseRosterState.q.trim().toLowerCase();
     const filtered = roster.filter((c) => (caseRosterState.owner === '全部' || c.lead_supervisor === caseRosterState.owner)
@@ -1532,10 +1536,23 @@ function drawCaseRosterTable(box, data) {
       });
     }
     box.innerHTML = `
-    ${roster.length ? `<div class="card" style="margin-bottom:16px"><div style="display:flex;flex-wrap:wrap;gap:16px 40px;align-items:flex-end">
+    ${!roster.length ? '' : `
+    <div class="card" style="margin-bottom:16px;background:var(--accent-l);border:1px solid var(--accent)">
+      <div class="small" style="margin-bottom:8px;color:var(--accent-d);font-weight:500">我的個案（${esc(me.name)}）</div>
+      <div style="display:flex;flex-wrap:wrap;gap:16px 40px">
+        ${[['列管個案數', myStats.total], ['家訪逾期', myStats.homeOverdue], ['本月電訪缺漏', myStats.phoneMissing], ['案本未繳交', myStats.fileMissing]].map(([k, v]) => `<div><div class="small" style="color:var(--accent-d)">${k}</div><div style="font-size:26px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--accent-d)">${v}</div></div>`).join('')}
+      </div>
+    </div>
+    <div class="card" style="margin-bottom:16px"><div style="display:flex;flex-wrap:wrap;gap:16px 40px;align-items:flex-end">
+      <div class="small muted" style="flex-basis:100%;margin-bottom:-4px">全體（所有督導合計）</div>
       ${[['列管個案數', summary.total], ['家訪逾期', summary.homeOverdue], ['本月電訪缺漏', summary.phoneMissing], ['案本未繳交', summary.fileMissing]].map(([k, v]) => `<div><div class="small muted">${k}</div><div style="font-size:26px;font-weight:700;font-variant-numeric:tabular-nums">${v}</div></div>`).join('')}
       <div class="small muted" style="margin-left:auto">訪視紀錄資料更新於 ${latestVisitImportAt ? fmtTime(latestVisitImportAt) : '尚無匯入紀錄'}</div>
-    </div></div>` : ''}
+    </div></div>
+    <div class="card" style="margin-bottom:16px">
+      <div class="small muted" style="margin-bottom:8px">各督導總覽（互相檢視用）</div>
+      <div class="tbox"><table class="t"><thead><tr><th>督導</th><th class="num">列管個案數</th><th class="num">家訪逾期</th><th class="num">本月電訪缺漏</th><th class="num">案本未繳交</th></tr></thead>
+        <tbody>${bySupervisor.map((s) => `<tr${s.owner === me.name ? ' style="background:var(--accent-l)"' : ''}><td>${esc(s.owner)}</td><td class="num">${s.total}</td><td class="num">${s.homeOverdue}</td><td class="num">${s.phoneMissing}</td><td class="num">${s.fileMissing}</td></tr>`).join('') || '<tr><td colspan="5" class="empty">無資料</td></tr>'}</tbody></table></div>
+    </div>`}
     ${!roster.length ? '' : (!audit.logMinMonth ? '<p class="small muted">還沒有匯入過訪視紀錄總表，「最近一次家訪／電訪」欄位暫時顯示尚無資料。到「個案比對」頁面的「家電訪稽核」頁籤可以匯入。</p>'
       : `<p class="small muted">訪視紀錄自 <strong>${audit.logMinMonth}</strong> 起開始匯入；此前月份不列入缺漏統計。</p>`)}
     <div class="card filters" style="margin:10px 0 16px">
