@@ -1474,7 +1474,7 @@ async function loadCaseRosterAudit() {
   const asOfMonth = logMonths.length ? [...logMonths, todayMonth].reduce((a, b) => (a > b ? a : b)) : todayMonth;
   const audit = effective.length ? auditCases(casesByNid, effective, asOfMonth) : { results: new Map(), logMinMonth: null, logMaxMonth: null, excludedCount: 0 };
   const latestVisitImportAt = visitBatches[0]?.imported_at || null;
-  // 「當月新案」來源是問案功能（不是個案清單）：成案且簽約日落在本月的筆數，依主責督導歸戶。
+  // 「當月簽約數」來源是問案功能（不是個案清單）：成案且簽約日落在本月的筆數，依主責督導歸戶。
   const newCaseCountByName = {};
   for (const r of confirmedInquiries) {
     if (!r.lead_staff_id || !r.contract_date || r.contract_date.slice(0, 7) !== todayMonth) continue;
@@ -1556,7 +1556,7 @@ function drawCaseRosterTable(box, data) {
         <div class="small muted" style="margin-left:auto">訪視紀錄資料更新於 ${latestVisitImportAt ? fmtTime(latestVisitImportAt) : '尚無匯入紀錄'}</div>
         <button type="button" class="btn small" id="statsToggle" title="${caseRosterState.statsCollapsed ? '展開' : '縮小'}" style="min-height:auto;padding:2px 10px;font-size:16px;line-height:1">${caseRosterState.statsCollapsed ? '+' : '−'}</button>
       </div>
-      ${caseRosterState.statsCollapsed ? '' : `<div class="tbox"><table class="t"><thead><tr><th>督導</th><th class="num">當月新案</th><th class="num">列管個案數</th><th class="num">家訪逾期</th><th class="num">本月電訪缺漏</th><th class="num">案本未繳交</th></tr></thead>
+      ${caseRosterState.statsCollapsed ? '' : `<div class="tbox"><table class="t"><thead><tr><th>督導</th><th class="num">當月簽約數</th><th class="num">列管個案數</th><th class="num">家訪逾期</th><th class="num">本月電訪缺漏</th><th class="num">案本未繳交</th></tr></thead>
         <tbody>${bySupervisor.map((s) => `<tr${s.owner === me.name ? ' style="background:var(--accent-l)"' : ''}><td>${esc(s.owner)}</td><td class="num">${s.newThisMonth}</td><td class="num">${s.total}</td><td class="num">${s.homeOverdue}</td><td class="num">${s.phoneMissing}</td><td class="num">${s.fileMissing}</td></tr>`).join('') || '<tr><td colspan="6" class="empty">無資料</td></tr>'}</tbody></table></div>`}
     </div>`}
     ${!roster.length ? '' : (!audit.logMinMonth ? '<p class="small muted">還沒有匯入過訪視紀錄總表，「最近一次家訪／電訪」欄位暫時顯示尚無資料。到「個案比對」頁面的「家電訪稽核」頁籤可以匯入。</p>'
