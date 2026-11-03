@@ -1507,7 +1507,6 @@ function drawCaseRosterTable(box, data) {
     phoneMissing: cases.filter((c) => lastStatusOf(c)?.電訪 === '缺漏').length,
     fileMissing: cases.filter((c) => !c.file_status).length,
   });
-  const summary = computeStats(roster);
   const myCases = roster.filter((c) => c.lead_supervisor === me.name);
   const myStats = computeStats(myCases);
   const bySupervisor = owners.map((o) => ({ owner: o, ...computeStats(roster.filter((c) => c.lead_supervisor === o)) }));
@@ -1543,13 +1542,11 @@ function drawCaseRosterTable(box, data) {
         ${[['列管個案數', myStats.total], ['家訪逾期', myStats.homeOverdue], ['本月電訪缺漏', myStats.phoneMissing], ['案本未繳交', myStats.fileMissing]].map(([k, v]) => `<div><div class="small" style="color:var(--accent-d)">${k}</div><div style="font-size:26px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--accent-d)">${v}</div></div>`).join('')}
       </div>
     </div>
-    <div class="card" style="margin-bottom:16px"><div style="display:flex;flex-wrap:wrap;gap:16px 40px;align-items:flex-end">
-      <div class="small muted" style="flex-basis:100%;margin-bottom:-4px">全體（所有督導合計）</div>
-      ${[['列管個案數', summary.total], ['家訪逾期', summary.homeOverdue], ['本月電訪缺漏', summary.phoneMissing], ['案本未繳交', summary.fileMissing]].map(([k, v]) => `<div><div class="small muted">${k}</div><div style="font-size:26px;font-weight:700;font-variant-numeric:tabular-nums">${v}</div></div>`).join('')}
-      <div class="small muted" style="margin-left:auto">訪視紀錄資料更新於 ${latestVisitImportAt ? fmtTime(latestVisitImportAt) : '尚無匯入紀錄'}</div>
-    </div></div>
     <div class="card" style="margin-bottom:16px">
-      <div class="small muted" style="margin-bottom:8px">各督導總覽（互相檢視用）</div>
+      <div style="display:flex;flex-wrap:wrap;align-items:baseline;gap:8px;margin-bottom:8px">
+        <div class="small muted">各督導總覽</div>
+        <div class="small muted" style="margin-left:auto">訪視紀錄資料更新於 ${latestVisitImportAt ? fmtTime(latestVisitImportAt) : '尚無匯入紀錄'}</div>
+      </div>
       <div class="tbox"><table class="t"><thead><tr><th>督導</th><th class="num">列管個案數</th><th class="num">家訪逾期</th><th class="num">本月電訪缺漏</th><th class="num">案本未繳交</th></tr></thead>
         <tbody>${bySupervisor.map((s) => `<tr${s.owner === me.name ? ' style="background:var(--accent-l)"' : ''}><td>${esc(s.owner)}</td><td class="num">${s.total}</td><td class="num">${s.homeOverdue}</td><td class="num">${s.phoneMissing}</td><td class="num">${s.fileMissing}</td></tr>`).join('') || '<tr><td colspan="5" class="empty">無資料</td></tr>'}</tbody></table></div>
     </div>`}
