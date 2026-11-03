@@ -1486,7 +1486,7 @@ async function viewCases() {
   drawCaseRosterTable(box, data);
 }
 
-const caseRosterState = { owner: '全部', unit: '全部', status: '全部', onlyIssues: false, q: '', sortBy: null, sortDir: 'asc' };
+const caseRosterState = { owner: '全部', unit: '全部', status: '全部', onlyIssues: false, q: '', sortBy: null, sortDir: 'asc', statsCollapsed: false };
 function drawCaseRosterTable(box, data) {
   const { roster, casesByNid, audit, unitLabel, latestVisitImportAt } = data;
   const activeStaffNames = new Set(L.staff.filter((s) => s.active).map((s) => s.name));
@@ -1543,12 +1543,13 @@ function drawCaseRosterTable(box, data) {
       </div>
     </div>
     <div class="card" style="margin-bottom:16px">
-      <div style="display:flex;flex-wrap:wrap;align-items:baseline;gap:8px;margin-bottom:8px">
+      <div style="display:flex;flex-wrap:wrap;align-items:baseline;gap:8px;margin-bottom:${caseRosterState.statsCollapsed ? '0' : '8px'}">
         <div class="small muted">各督導總覽</div>
         <div class="small muted" style="margin-left:auto">訪視紀錄資料更新於 ${latestVisitImportAt ? fmtTime(latestVisitImportAt) : '尚無匯入紀錄'}</div>
+        <button type="button" class="btn small" id="statsToggle" title="${caseRosterState.statsCollapsed ? '展開' : '縮小'}" style="min-height:auto;padding:2px 10px;font-size:16px;line-height:1">${caseRosterState.statsCollapsed ? '+' : '−'}</button>
       </div>
-      <div class="tbox"><table class="t"><thead><tr><th>督導</th><th class="num">列管個案數</th><th class="num">家訪逾期</th><th class="num">本月電訪缺漏</th><th class="num">案本未繳交</th></tr></thead>
-        <tbody>${bySupervisor.map((s) => `<tr${s.owner === me.name ? ' style="background:var(--accent-l)"' : ''}><td>${esc(s.owner)}</td><td class="num">${s.total}</td><td class="num">${s.homeOverdue}</td><td class="num">${s.phoneMissing}</td><td class="num">${s.fileMissing}</td></tr>`).join('') || '<tr><td colspan="5" class="empty">無資料</td></tr>'}</tbody></table></div>
+      ${caseRosterState.statsCollapsed ? '' : `<div class="tbox"><table class="t"><thead><tr><th>督導</th><th class="num">列管個案數</th><th class="num">家訪逾期</th><th class="num">本月電訪缺漏</th><th class="num">案本未繳交</th></tr></thead>
+        <tbody>${bySupervisor.map((s) => `<tr${s.owner === me.name ? ' style="background:var(--accent-l)"' : ''}><td>${esc(s.owner)}</td><td class="num">${s.total}</td><td class="num">${s.homeOverdue}</td><td class="num">${s.phoneMissing}</td><td class="num">${s.fileMissing}</td></tr>`).join('') || '<tr><td colspan="5" class="empty">無資料</td></tr>'}</tbody></table></div>`}
     </div>`}
     ${!roster.length ? '' : (!audit.logMinMonth ? '<p class="small muted">還沒有匯入過訪視紀錄總表，「最近一次家訪／電訪」欄位暫時顯示尚無資料。到「個案比對」頁面的「家電訪稽核」頁籤可以匯入。</p>'
       : `<p class="small muted">訪視紀錄自 <strong>${audit.logMinMonth}</strong> 起開始匯入；此前月份不列入缺漏統計。</p>`)}
@@ -1612,6 +1613,7 @@ function drawCaseRosterTable(box, data) {
     };
     $('#th-caseno').onclick = () => toggleSort('case_no');
     $('#th-startdate').onclick = () => toggleSort('service_start_date');
+    $('#statsToggle')?.addEventListener('click', () => { caseRosterState.statsCollapsed = !caseRosterState.statsCollapsed; draw(); });
     $('#rfOwner').onchange = (e) => { caseRosterState.owner = e.target.value; draw(); };
     $('#rfUnit').onchange = (e) => { caseRosterState.unit = e.target.value; draw(); };
     $('#rfStatus').onchange = (e) => { caseRosterState.status = e.target.value; draw(); };
