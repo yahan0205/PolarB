@@ -97,12 +97,15 @@ async function signOut() {
 class AuthError extends Error { constructor() { super('請重新登入'); } }
 
 /* ================= 資料存取 ================= */
-async function rest(method, path, { params, body, prefer, headers } = {}) {
+// count:true 時會額外帶 Prefer: count=exact，並從回應的 Content-Range 標頭（例："0-999/13758"）
+// 解析出總筆數，回傳 { data, total } 而不是單純的 data——只有 db.all() 用得到，其他呼叫方不受影響。
+async function rest(method, path, { params, body, prefer, headers, count } = {}) {
   const tok = await accessToken();
   const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+  const preferHeader = [prefer, count ? 'count=exact' : null].filter(Boolean).join(',') || undefined;
   const res = await fetch(`${BASE}/rest/v1/${path}${qs}`, {
     method,
-    headers: { apikey: KEY, Authorization: `Bearer ${tok}`, 'Content-Type': 'application/json', ...(prefer ? { Prefer: prefer } : {}), ...(headers || {}) },
+    headers: { apikey: KEY, Authorization: `Bearer ${tok}`, 'Content-Type': 'application/json', ...(preferHeader ? { Prefer: preferHeader } : {}), ...(headers || {}) },
     body: body ? JSON.stringify(body) : undefined,
   });
   if (res.status === 401) { signOutLocal(); throw new AuthError(); }
@@ -114,18 +117,46 @@ async function rest(method, path, { params, body, prefer, headers } = {}) {
       : /inquiries_case_no_uniq/.test(m) ? '這個仁寶案號已經連結到另一筆問案了'
       : m);
   }
+  if (count) {
+    const cr = res.headers.get('content-range'); // "0-999/13758"（沒資料時是 "*/0"）
+    const total = cr ? Number(cr.split('/')[1]) : null;
+    return { data, total: Number.isFinite(total) ? total : null };
+  }
   return data;
 }
 
 const db = {
   get: (table, params) => rest('GET', table, { params }),
+  // 大表（像 rk_visits 這種上萬筆的訪視歷史）如果用「抓一頁、等回來、再抓下一頁」會很慢
+  // ——先用 count=exact 問出總筆數，算出所有分頁的 offset，再用小併發池同時發出去（不是一次全部發出去：
+  // Supabase 免費方案的連線池有限，實測一次發 14 個分頁請求會有三分之一左右回應 500，
+  // 全部一次發出去反而會讓整頁直接載入失敗，所以限制同時只發 4 個，搭配失敗重試）。
   async all(table, params = {}) {
-    const out = []; const size = 1000;
-    for (let off = 0; ; off += size) {
-      const page = await rest('GET', table, { params: { ...params, limit: size, offset: off } });
-      out.push(...page);
-      if (page.length < size) return out;
-    }
+    const size = 1000;
+    const first = await rest('GET', table, { params: { ...params, limit: size, offset: 0 }, count: true });
+    const { data, total } = first;
+    if (total === null || data.length < size || data.length >= total) return data;
+    const offsets = [];
+    for (let off = size; off < total; off += size) offsets.push(off);
+    const fetchPage = async (offset, triesLeft = 3) => {
+      try { return await rest('GET', table, { params: { ...params, limit: size, offset } }); }
+      catch (e) {
+        if (triesLeft <= 1) throw e;
+        await new Promise((r) => setTimeout(r, 400));
+        return fetchPage(offset, triesLeft - 1);
+      }
+    };
+    const CONCURRENCY = 4;
+    const pages = new Array(offsets.length);
+    let next = 0;
+    const workers = Array.from({ length: Math.min(CONCURRENCY, offsets.length) }, async () => {
+      while (next < offsets.length) {
+        const i = next++;
+        pages[i] = await fetchPage(offsets[i]);
+      }
+    });
+    await Promise.all(workers);
+    return data.concat(...pages);
   },
   insert: (table, body) => rest('POST', table, { body, prefer: 'return=representation' }).then((r) => r[0]),
   insertMany: (table, rows) => rest('POST', table, { body: rows, prefer: 'return=minimal' }),
