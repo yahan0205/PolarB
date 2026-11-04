@@ -366,7 +366,8 @@ async function viewForm(id, presetStatus) {
       <label class="f">區域 <span class="req">*</span><select name="region">${REGIONS.map((x) => opt(x, x, r.region)).join('')}</select></label>
       <label class="f">問案日期 <span class="req">*</span><input type="date" name="inquiry_date" value="${esc(r.inquiry_date || '')}"></label>
       <label class="f">收案督導 <span class="req">*</span><select name="intake_staff_id">${staffOpts(r.intake_staff_id)}</select></label>
-      <label class="f">轉介單位 <span class="req">*</span><select name="unit_id">${opt('', '請選擇', r.unit_id)}${activeOr(L.units, r.unit_id).map((u) => opt(u.id, u.name, r.unit_id)).join('')}</select></label>
+      <label class="f">轉介單位 <span class="req">*</span><input type="text" name="unit_name" list="unitlist" autocomplete="off" value="${esc(L.unitById[r.unit_id]?.name || '')}" placeholder="輸入一個字搜尋">
+      <datalist id="unitlist">${activeOr(L.units, r.unit_id).map((u) => `<option value="${esc(u.name)}">`).join('')}</datalist></label>
       <label class="f">個管師<input type="text" name="case_manager" value="${esc(r.case_manager || '')}" placeholder="姓氏即可"></label>
       <label class="f">個案姓名 <span class="req">*</span><input type="text" name="client_name" value="${esc(r.client_name || '')}"></label>
       <label class="f spanall">地址（區／路名即可） <span class="req">*</span><input type="text" name="address" value="${esc(r.address || '')}"></label>
@@ -437,8 +438,13 @@ async function viewForm(id, presetStatus) {
     e.preventDefault();
     const v = (n) => f[n].value.trim() || null;
     const num = (n) => (f[n].value ? Number(f[n].value) : null);
+    // 轉介單位改成輸入文字＋datalist 建議清單加速搜尋，存檔時用名稱精確比對回 unit_id
+    // （啟用中、或目前已選但已停用的單位都算在建議清單內，所以已選的舊單位改別的狀態後還是比對得到）。
+    const unitByName = new Map(activeOr(L.units, r.unit_id).map((u) => [u.name, u.id]));
+    const unitNameRaw = v('unit_name');
+    const unit_id = unitNameRaw ? (unitByName.get(unitNameRaw) ?? null) : null;
     const body = {
-      region: v('region'), inquiry_date: v('inquiry_date'), intake_staff_id: num('intake_staff_id'), unit_id: num('unit_id'),
+      region: v('region'), inquiry_date: v('inquiry_date'), intake_staff_id: num('intake_staff_id'), unit_id,
       case_manager: v('case_manager'), client_name: v('client_name'), address: v('address'), service_detail: v('service_detail'),
       condition_ids: $$('input[name=cond]:checked', f).map((c) => Number(c.value)),
       condition_other_note: $('input[data-other="1"]', f)?.checked ? v('condition_other_note') : null,
@@ -449,7 +455,7 @@ async function viewForm(id, presetStatus) {
     };
     const miss = [];
     if (!body.region) miss.push('區域'); if (!body.inquiry_date) miss.push('問案日期'); if (!body.intake_staff_id) miss.push('收案督導');
-    if (!body.unit_id) miss.push('轉介單位'); if (!body.client_name) miss.push('個案姓名'); if (!body.address) miss.push('地址');
+    if (!body.unit_id) miss.push(unitNameRaw ? '轉介單位（輸入的名稱不在清單裡，請從建議選單選擇）' : '轉介單位'); if (!body.client_name) miss.push('個案姓名'); if (!body.address) miss.push('地址');
     if (!body.service_detail) miss.push('個案細項與安排');
     if (body.status === '成案') { if (!body.lead_staff_id) miss.push('主責督導'); if (!body.referral_date) miss.push('照會日期'); if (!body.contract_date) miss.push('簽約日'); }
     if (body.status === '未成案' && !body.nc_reason_id) miss.push('未成案原因');
