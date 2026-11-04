@@ -1132,6 +1132,7 @@ function auditCases(casesByNid, records, asOfMonth) {
 }
 
 let caseCheckState = { tab: 'upload', visitsSub: 'list' };
+let visitListState = { owner: '全部', sortDir: 'asc' };
 async function viewCaseCheck() {
   $('#main').innerHTML = `
   <div class="head"><div><h1>個案比對</h1><div class="muted small" style="margin-top:4px">每月匯入仁寶系統的個案總表，跟博樂系統的問案資料交叉比對，避免漏填。</div></div></div>
@@ -1320,21 +1321,28 @@ async function drawCcVisits(box) {
 
 async function drawVisitList(box, audit) {
   const { results } = audit;
-  const items = [];
+  const allItems = [];
   for (const r of results.values()) {
     for (const m of r.months) {
       const st = r.monthStatus[m];
-      if (st.電訪 === '缺漏') items.push({ r, m, type: '電訪缺漏' });
-      if (st.家訪 === '缺漏(未收案家訪)') items.push({ r, m, type: '家訪缺漏' });
-      else if (st.家訪 === '逾期') items.push({ r, m, type: '家訪逾期' });
+      if (st.電訪 === '缺漏') allItems.push({ r, m, type: '電訪缺漏' });
+      if (st.家訪 === '缺漏(未收案家訪)') allItems.push({ r, m, type: '家訪缺漏' });
+      else if (st.家訪 === '逾期') allItems.push({ r, m, type: '家訪逾期' });
     }
   }
-  items.sort((a, b) => a.r.owner.localeCompare(b.r.owner) || a.r.name.localeCompare(b.r.name) || a.m.localeCompare(b.m));
+  const owners = [...new Set(allItems.map((i) => i.r.owner))].sort();
+  const items = visitListState.owner === '全部' ? allItems : allItems.filter((i) => i.r.owner === visitListState.owner);
+  const dir = visitListState.sortDir === 'desc' ? -1 : 1;
+  items.sort((a, b) => dir * a.m.localeCompare(b.m) || a.r.owner.localeCompare(b.r.owner) || a.r.name.localeCompare(b.r.name));
   const notes = await db.all('rk_visit_notes', {});
   const noteMap = new Map(notes.map((n) => [`${n.national_id}|${n.month}|${n.deficiency_type}`, n]));
+  const sortArrow = visitListState.sortDir === 'desc' ? '▼' : '▲';
   box.innerHTML = `
-  <div class="muted small" style="margin-bottom:8px">電訪缺漏 ${items.filter((i) => i.type === '電訪缺漏').length} 筆　家訪缺漏 ${items.filter((i) => i.type === '家訪缺漏').length} 筆　家訪逾期 ${items.filter((i) => i.type === '家訪逾期').length} 筆</div>
-  <div class="tbox"><table class="t"><thead><tr><th>主責督導</th><th>姓名</th><th>月份</th><th>缺漏類型</th><th>原因說明</th></tr></thead>
+  <div class="muted small" style="margin-bottom:8px">電訪缺漏 ${allItems.filter((i) => i.type === '電訪缺漏').length} 筆　家訪缺漏 ${allItems.filter((i) => i.type === '家訪缺漏').length} 筆　家訪逾期 ${allItems.filter((i) => i.type === '家訪逾期').length} 筆</div>
+  <div class="card filters" style="margin-bottom:10px">
+    <label class="inline-check">主責督導 <select id="vlOwner">${opt('全部', '全部', visitListState.owner)}${owners.map((o) => opt(o, o, visitListState.owner)).join('')}</select></label>
+  </div>
+  <div class="tbox"><table class="t"><thead><tr><th>主責督導</th><th>姓名</th><th id="th-vmonth" style="cursor:pointer;user-select:none" title="點擊排序">月份 <span class="small muted">${sortArrow}</span></th><th>缺漏類型</th><th>原因說明</th></tr></thead>
     <tbody>${items.map((it) => {
       const key = `${it.r.nationalId}|${it.m}|${it.type}`;
       const n = noteMap.get(key);
@@ -1342,6 +1350,8 @@ async function drawVisitList(box, audit) {
         <td><span class="st ${it.type === '家訪逾期' ? 'r-拒絕' : 's-問案中'}">${it.type}</span></td>
         <td><input type="text" class="vnote" data-nid="${esc(it.r.nationalId)}" data-m="${it.m}" data-type="${esc(it.type)}" value="${esc(n?.note || '')}" placeholder="例：已電聯家屬確認" style="width:100%"></td></tr>`;
     }).join('') || '<tr><td colspan="5" class="empty">目前沒有缺漏項目。</td></tr>'}</tbody></table></div>`;
+  $('#vlOwner').onchange = (e) => { visitListState.owner = e.target.value; drawVisitList(box, audit); };
+  $('#th-vmonth').onclick = () => { visitListState.sortDir = visitListState.sortDir === 'desc' ? 'asc' : 'desc'; drawVisitList(box, audit); };
   $$('.vnote').forEach((input) => {
     input.onblur = async () => {
       try {
