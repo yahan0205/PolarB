@@ -1367,28 +1367,33 @@ function drawVisitStats(box, audit) {
     for (const m of r.months) {
       allMonthsSet.add(m);
       const st = r.monthStatus[m];
-      let issue = 0;
-      if (st.電訪 === '缺漏') { a.phoneMissing++; issue++; }
-      if (st.家訪 === '缺漏(未收案家訪)') { a.homeMissing++; issue++; }
-      else if (st.家訪 === '逾期') { a.homeOverdue++; issue++; }
-      if (issue) a.byMonth.set(m, (a.byMonth.get(m) || 0) + issue);
+      const cell = a.byMonth.get(m) || { home: 0, phone: 0 };
+      if (st.電訪 === '缺漏') { a.phoneMissing++; cell.phone++; }
+      if (st.家訪 === '缺漏(未收案家訪)') { a.homeMissing++; cell.home++; }
+      else if (st.家訪 === '逾期') { a.homeOverdue++; cell.home++; }
+      if (cell.home || cell.phone) a.byMonth.set(m, cell);
     }
   }
   const owners = [...agg.keys()].sort();
-  // 每個居督每年每月的缺漏情形：每月初核對上個月的狀況時，直接從這張表看哪個督導哪個月有缺漏。
+  // 每個居督每年每月的缺漏情形：每月初核對上個月的狀況時，直接從這張表看哪個督導哪個月家訪、電訪各缺漏幾筆。
+  // 家訪、電訪分開呈現（不加總），跟個案詳情視窗的逐月表格邏輯一致。
   const allMonths = [...allMonthsSet].sort();
   box.innerHTML = `
   <div class="tbox" style="margin-bottom:16px"><table class="t"><thead><tr><th>主責督導</th><th class="num">列管個案數</th><th class="num">電訪缺漏筆數</th><th class="num">家訪缺漏筆數</th><th class="num">家訪逾期筆數</th><th class="num">個案清單未列名</th></tr></thead>
     <tbody>${owners.map((o) => { const a = agg.get(o); return `<tr><td>${esc(o)}</td><td class="num">${a.cases}</td><td class="num">${a.phoneMissing}</td><td class="num">${a.homeMissing}</td><td class="num">${a.homeOverdue}</td><td class="num">${a.unlisted}</td></tr>`; }).join('') || '<tr><td colspan="6" class="empty">無資料</td></tr>'}</tbody></table></div>
-  <div class="small muted" style="margin-bottom:8px">各督導每月缺漏情形（家訪缺漏＋家訪逾期＋電訪缺漏加總），方便每月初核對上個月狀況</div>
-  <div class="tbox"><table class="t"><thead><tr><th>督導</th>${allMonths.map((m) => `<th class="num">${fmtMonth(m)}</th>`).join('')}</tr></thead>
+  <div class="small muted" style="margin-bottom:8px">各督導每月缺漏情形（家訪缺漏／逾期、電訪缺漏分開呈現），方便每月初核對上個月狀況</div>
+  <div class="tbox"><table class="t"><thead>
+    <tr><th rowspan="2" style="vertical-align:bottom">督導</th>${allMonths.map((m) => `<th colspan="2" class="num">${fmtMonth(m)}</th>`).join('')}</tr>
+    <tr>${allMonths.map(() => '<th class="num">家訪</th><th class="num">電訪</th>').join('')}</tr>
+  </thead>
     <tbody>${owners.map((o) => {
       const a = agg.get(o);
       return `<tr><td class="nowrap">${esc(o)}</td>${allMonths.map((m) => {
-        const v = a.byMonth.get(m) || 0;
-        return `<td class="num"${v ? ' style="color:var(--bad);font-weight:600"' : ''}>${v || ''}</td>`;
+        const cell = a.byMonth.get(m);
+        const home = cell?.home || 0, phone = cell?.phone || 0;
+        return `<td class="num"${home ? ' style="color:var(--bad);font-weight:600"' : ''}>${home || ''}</td><td class="num"${phone ? ' style="color:var(--bad);font-weight:600"' : ''}>${phone || ''}</td>`;
       }).join('')}</tr>`;
-    }).join('') || `<tr><td colspan="${allMonths.length + 1}" class="empty">無資料</td></tr>`}</tbody></table></div>`;
+    }).join('') || `<tr><td colspan="${allMonths.length * 2 + 1}" class="empty">無資料</td></tr>`}</tbody></table></div>`;
 }
 
 function drawVisitImport(box) {
@@ -1619,10 +1624,7 @@ function drawCaseRosterTable(box, data) {
           : !st ? '<span class="faint">—</span>'
           : st.電訪 === '達標' ? fmtDate(st.電訪日期)
           : '<span class="st s-問案中">本月電訪缺漏</span>';
-        const fileTitle = c.file_updated_by_name ? `最後更新：${esc(c.file_updated_by_name)} ${fmtTime(c.file_updated_at)}` : '尚未更新';
-        const fileCell = isDirector()
-          ? `<button type="button" class="link" data-ftoggle="${c.id}" style="color:${c.file_status ? 'var(--ok)' : 'var(--ink2)'}" title="${fileTitle}">${c.file_status ? '✓ 已繳交' : '未繳交'}</button>`
-          : `<span class="st ${c.file_status ? 's-成案' : 's-未成案'}" title="${fileTitle}">${c.file_status ? '✓ 已繳交' : '未繳交'}</span>`;
+        const fileCell = fileCellHtml(c, r);
         return `<tr class="click" data-crow="${esc(c.national_id || '')}" data-cid="${c.id}">
           <td class="nowrap">${esc(c.case_no)}</td>
           <td class="nowrap">${esc(c.name)}</td>
@@ -1653,7 +1655,7 @@ function drawCaseRosterTable(box, data) {
     $('#rfIssue').onchange = (e) => { caseRosterState.onlyIssues = e.target.checked; draw(); };
     $('#rfQ').oninput = (e) => { caseRosterState.q = e.target.value; clearTimeout(draw._t); draw._t = setTimeout(draw, 250); };
     $$('[data-crow]').forEach((tr) => (tr.onclick = (e) => {
-      if (e.target.closest('[data-ftoggle]')) return;
+      if (e.target.closest('[data-ftoggle], [data-freview]')) return;
       const c = casesByNid[tr.dataset.crow] || roster.find((x) => String(x.id) === tr.dataset.cid);
       openCaseDetailModal(c, c?.national_id ? audit.results.get(c.national_id) : null);
     }));
@@ -1662,6 +1664,11 @@ function drawCaseRosterTable(box, data) {
       const c = roster.find((x) => String(x.id) === b.dataset.ftoggle);
       if (!c) return;
       try { await toggleFileStatus(c); viewCases(); } catch (err) { toast(err.message, true); }
+    }));
+    $$('[data-freview]').forEach((b) => (b.onclick = (e) => {
+      e.stopPropagation();
+      const c = roster.find((x) => String(x.id) === b.dataset.freview);
+      if (c) openFileReviewEditor(c);
     }));
     if (isDirector() && $('#cr-import')) drawCaseRosterImport($('#cr-import'), roster);
   };
@@ -1677,6 +1684,55 @@ async function toggleFileStatus(c) {
   toast(next ? '已標記案本已繳交' : '已標記案本未繳交');
 }
 
+// 案本欄位分兩排：上排「有/無」（案本這份文件存不存在），下排「審至幾年幾月」（審查到哪個家訪週期，
+// 兩者是獨立概念，分開記錄）。審至落後最近一次合格家訪的月份，代表有新一期案本還沒送審，用紅字警示。
+function fileCellHtml(c, r) {
+  const fileTitle = c.file_updated_by_name ? `最後更新：${esc(c.file_updated_by_name)} ${fmtTime(c.file_updated_at)}` : '尚未更新';
+  const line1 = isDirector()
+    ? `<button type="button" class="link" data-ftoggle="${c.id}" style="color:${c.file_status ? 'var(--ok)' : 'var(--ink2)'}" title="${fileTitle}">${c.file_status ? '✓ 已繳交' : '未繳交'}</button>`
+    : `<span class="st ${c.file_status ? 's-成案' : 's-未成案'}" title="${fileTitle}">${c.file_status ? '✓ 已繳交' : '未繳交'}</span>`;
+
+  const reviewBehind = !!(r && r.lastHomeMonth && (!c.file_reviewed_through || c.file_reviewed_through < r.lastHomeMonth));
+  const reviewText = c.file_reviewed_through ? `審至 ${fmtMonth(c.file_reviewed_through)}` : '未填審查進度';
+  const reviewTitle = c.file_reviewed_by_name ? `最後更新：${esc(c.file_reviewed_by_name)} ${fmtTime(c.file_reviewed_at)}` : '尚未設定';
+  const reviewStyle = reviewBehind ? 'color:var(--bad);font-weight:600' : 'color:var(--ink2)';
+  const line2 = isDirector()
+    ? `<button type="button" class="link" data-freview="${c.id}" style="${reviewStyle}" title="${reviewTitle}">${esc(reviewText)}${reviewBehind ? ' ⚠' : ''}</button>`
+    : `<span class="small" style="${reviewBehind ? 'color:var(--bad);font-weight:600' : 'color:var(--muted)'}" title="${reviewTitle}">${esc(reviewText)}${reviewBehind ? ' ⚠' : ''}</span>`;
+
+  return `<div>${line1}</div><div class="small" style="margin-top:2px">${line2}</div>`;
+}
+
+// afterSave：儲存成功後要做的事，預設是重新整理個案清單；若是從「個案詳情」視窗內點編輯進來的，
+// 因為 modal() 共用同一個 #modal-root（不是堆疊式的），開啟這個編輯視窗會把底下的詳情視窗直接蓋掉，
+// 存檔後單純 close() 會變成什麼視窗都沒有——所以改由呼叫端傳入 afterSave 決定存檔後要回到哪裡
+// （例如重新開啟個案詳情視窗），而不是在這裡寫死 viewCases()。
+function openFileReviewEditor(c, afterSave) {
+  modal(`<h2>更新案本審查進度</h2>
+    <p class="small muted" style="margin:4px 0 10px">${esc(c.name)}（案號 ${esc(c.case_no)}）</p>
+    <label class="f">審至（年/月）<input type="month" id="reviewMonth" value="${esc(c.file_reviewed_through || '')}"></label>
+    <p class="err-text" id="reviewErr" hidden></p>
+    <div class="acts"><button type="button" class="btn" data-no>取消</button><button type="button" class="btn primary" data-yes>儲存</button></div>`,
+  (m, close) => {
+    $('[data-no]', m).onclick = close;
+    $('[data-yes]', m).onclick = async () => {
+      const val = $('#reviewMonth', m).value;
+      const er = $('#reviewErr', m);
+      if (!val) { er.textContent = '請選擇年月'; er.hidden = false; return; }
+      try {
+        const now = new Date().toISOString();
+        await db.update('case_roster', c.id, {
+          file_reviewed_through: val, file_reviewed_at: now,
+          file_reviewed_by: session.user.id, file_reviewed_by_name: me.name,
+        });
+        c.file_reviewed_through = val; c.file_reviewed_at = now; c.file_reviewed_by_name = me.name;
+        toast('已更新案本審查進度'); close();
+        if (afterSave) afterSave(); else viewCases();
+      } catch (e) { er.textContent = e.message; er.hidden = false; }
+    };
+  });
+}
+
 function openCaseDetailModal(c, r) {
   if (!c) return;
   // 警示：只要有任一個月家訪逾期/缺漏，或電訪缺漏，就在最上方用明顯的紅色提示條列出來，
@@ -1688,18 +1744,26 @@ function openCaseDetailModal(c, r) {
   const warningHtml = issueMonths.length
     ? `<p class="small" style="color:var(--bad);background:var(--bad-bg);padding:8px 12px;border-radius:8px;margin:8px 0 0">⚠ 開始服務後共有 ${issueMonths.length} 個月家訪逾期／缺漏或電訪缺漏，詳見下方逐月狀態</p>`
     : (r ? `<p class="small" style="color:var(--ok);background:var(--ok-bg);padding:8px 12px;border-radius:8px;margin:8px 0 0">✓ 開始服務後的家訪／電訪紀錄目前沒有缺漏或逾期</p>` : '');
+  const reviewBehind = !!(r && r.lastHomeMonth && (!c.file_reviewed_through || c.file_reviewed_through < r.lastHomeMonth));
+  const reviewText = c.file_reviewed_through ? fmtMonth(c.file_reviewed_through) : '未填審查進度';
   const monthsHtml = r ? `<div class="tbox" style="max-height:50vh;overflow:auto;margin-top:10px"><table class="t"><thead><tr><th>月份</th><th>家訪</th><th>電訪</th></tr></thead>
       <tbody>${r.months.map((m) => {
         const st = r.monthStatus[m];
+        const homeIssue = st.家訪 === '逾期' || st.家訪 === '缺漏(未收案家訪)';
+        const phoneIssue = st.電訪 === '缺漏';
         const homeText = st.家訪 === '達標' ? `達標（${fmtDate(st.家訪日期)}）` : st.家訪;
         const phoneText = st.電訪 === '達標' ? `達標（${fmtDate(st.電訪日期)}）` : st.電訪;
-        return `<tr><td>${fmtMonth(m)}</td><td>${esc(homeText)}</td><td>${esc(phoneText)}</td></tr>`;
+        const homeCellHtml = homeIssue ? `<span style="color:var(--bad);font-weight:600">${esc(homeText)}</span>` : esc(homeText);
+        const phoneCellHtml = phoneIssue ? `<span style="color:var(--bad);font-weight:600">${esc(phoneText)}</span>` : esc(phoneText);
+        return `<tr><td>${fmtMonth(m)}</td><td>${homeCellHtml}</td><td>${phoneCellHtml}</td></tr>`;
       }).join('')}</tbody></table></div>${r.blankMonths.length ? `<p class="small" style="color:var(--warn);margin-top:10px">以下月份有紀錄但內容不足 30 字、未採計：${esc(r.blankMonths.map(fmtMonth).join('、'))}</p>` : ''}`
     : '<p class="small muted" style="margin-top:10px">還沒有訪視紀錄可供比對。</p>';
   modal(`<h2>${esc(c.name)}</h2>
     <p class="small muted" style="margin:4px 0 10px">案號 ${esc(c.case_no)}　身分證字號 ${esc(c.national_id)}　主責督導 ${esc(c.lead_supervisor)}　A單位 ${esc(c.unit_name)}　狀態 ${esc(c.status)}</p>
     <div class="inline-check">案本：<span id="cdFile">${c.file_status ? '✓ 已繳交' : '未繳交'}</span>${c.file_updated_by_name ? `<span class="small muted"> （${esc(c.file_updated_by_name)} ${fmtTime(c.file_updated_at)}）</span>` : ''}
       ${isDirector() ? '<button type="button" class="link" data-ftoggle2 style="margin-left:8px">切換</button>' : ''}</div>
+    <div class="inline-check" style="margin-top:4px">審至：<span id="cdReview" style="${reviewBehind ? 'color:var(--bad);font-weight:600' : ''}">${reviewText}${reviewBehind ? ' ⚠' : ''}</span>${c.file_reviewed_by_name ? `<span class="small muted"> （${esc(c.file_reviewed_by_name)} ${fmtTime(c.file_reviewed_at)}）</span>` : ''}
+      ${isDirector() ? '<button type="button" class="link" data-freview2 style="margin-left:8px">編輯</button>' : ''}</div>
     ${warningHtml}
     ${monthsHtml}
     <div class="acts"><button type="button" class="btn" data-no>關閉</button></div>`,
@@ -1711,6 +1775,8 @@ function openCaseDetailModal(c, r) {
       try { await toggleFileStatus(c); c.file_status = !c.file_status; $('#cdFile', m).textContent = c.file_status ? '✓ 已繳交' : '未繳交'; } catch (e) { toast(e.message, true); }
       tb.disabled = false;
     };
+    const rb = $('[data-freview2]', m);
+    if (rb) rb.onclick = () => openFileReviewEditor(c, () => { viewCases(); openCaseDetailModal(c, r); });
   });
 }
 
