@@ -1391,7 +1391,7 @@ function drawVisitStats(box, audit) {
       return `<tr><td class="nowrap">${esc(o)}</td>${allMonths.map((m) => {
         const cell = a.byMonth.get(m);
         const home = cell?.home || 0, phone = cell?.phone || 0;
-        return `<td class="num"${home ? ' style="color:var(--bad);font-weight:600"' : ''}>${home || ''}</td><td class="num"${phone ? ' style="color:var(--bad);font-weight:600"' : ''}>${phone || ''}</td>`;
+        return `<td class="num"${home ? ' style="color:var(--bad);font-weight:600"' : ''}>${home}</td><td class="num"${phone ? ' style="color:var(--bad);font-weight:600"' : ''}>${phone}</td>`;
       }).join('')}</tr>`;
     }).join('') || `<tr><td colspan="${allMonths.length * 2 + 1}" class="empty">無資料</td></tr>`}</tbody></table></div>`;
 }
