@@ -97,15 +97,12 @@ async function signOut() {
 class AuthError extends Error { constructor() { super('請重新登入'); } }
 
 /* ================= 資料存取 ================= */
-// count:true 時會額外帶 Prefer: count=exact，並從回應的 Content-Range 標頭（例："0-999/13758"）
-// 解析出總筆數，回傳 { data, total } 而不是單純的 data——只有 db.all() 用得到，其他呼叫方不受影響。
-async function rest(method, path, { params, body, prefer, headers, count } = {}) {
+async function rest(method, path, { params, body, prefer, headers } = {}) {
   const tok = await accessToken();
   const qs = params ? '?' + new URLSearchParams(params).toString() : '';
-  const preferHeader = [prefer, count ? 'count=exact' : null].filter(Boolean).join(',') || undefined;
   const res = await fetch(`${BASE}/rest/v1/${path}${qs}`, {
     method,
-    headers: { apikey: KEY, Authorization: `Bearer ${tok}`, 'Content-Type': 'application/json', ...(preferHeader ? { Prefer: preferHeader } : {}), ...(headers || {}) },
+    headers: { apikey: KEY, Authorization: `Bearer ${tok}`, 'Content-Type': 'application/json', ...(prefer ? { Prefer: prefer } : {}), ...(headers || {}) },
     body: body ? JSON.stringify(body) : undefined,
   });
   if (res.status === 401) { signOutLocal(); throw new AuthError(); }
@@ -117,46 +114,50 @@ async function rest(method, path, { params, body, prefer, headers, count } = {})
       : /inquiries_case_no_uniq/.test(m) ? '這個仁寶案號已經連結到另一筆問案了'
       : m);
   }
-  if (count) {
-    const cr = res.headers.get('content-range'); // "0-999/13758"（沒資料時是 "*/0"）
-    const total = cr ? Number(cr.split('/')[1]) : null;
-    return { data, total: Number.isFinite(total) ? total : null };
-  }
   return data;
 }
 
 const db = {
   get: (table, params) => rest('GET', table, { params }),
-  // 大表（像 rk_visits 這種上萬筆的訪視歷史）如果用「抓一頁、等回來、再抓下一頁」會很慢
-  // ——先用 count=exact 問出總筆數，算出所有分頁的 offset，再用小併發池同時發出去（不是一次全部發出去：
-  // Supabase 免費方案的連線池有限，實測一次發 14 個分頁請求會有三分之一左右回應 500，
-  // 全部一次發出去反而會讓整頁直接載入失敗，所以限制同時只發 4 個，搭配失敗重試）。
+  // 大表（像 rk_visits 這種上萬筆的訪視歷史）分頁抓取：
+  // 原本用「offset 分頁」實測發現 Postgres 底層會隨著 offset 越深越慢——offset=0 抓一頁約
+  // 0.3~0.4 秒，offset=13000 抓同樣大小的一頁卻要 2.8 秒（要整批掃過＋丟棄前面 13000 筆才拿得到
+  // 下一批），這是 OFFSET 分頁的已知通病，不是網路或併發的問題，之前改成「平行抓取」頂多是讓這些
+  // 變慢的請求同時發生，總時間只有小幅改善（14 頁要 16~35 秒）。
+  // 改成「id 遊標分頁」（下一頁用 id > 上一頁最後一筆的 id，直接走主鍵索引）後，不管第幾頁速度都
+  // 差不多快，同樣 14 頁實測只要約 5 秒。只有在呼叫端沒有自訂 order 時才能這樣做（遊標分頁的前提
+  // 是依 id 排序；系統裡少數幾個呼叫會自訂 order 做下拉選單/列表排序用，那些資料表都很小、
+  // 用不到第二頁，所以維持原本的 offset 分頁，兩種情況分開處理，互不影響。
   async all(table, params = {}) {
     const size = 1000;
-    const first = await rest('GET', table, { params: { ...params, limit: size, offset: 0 }, count: true });
-    const { data, total } = first;
-    if (total === null || data.length < size || data.length >= total) return data;
-    const offsets = [];
-    for (let off = size; off < total; off += size) offsets.push(off);
-    const fetchPage = async (offset, triesLeft = 3) => {
-      try { return await rest('GET', table, { params: { ...params, limit: size, offset } }); }
+    if (params.order) {
+      // 呼叫端指定了排序（通常是小型清單，一頁抓得完），用原本的 offset 分頁即可。
+      const out = [];
+      for (let off = 0; ; off += size) {
+        const page = await rest('GET', table, { params: { ...params, limit: size, offset: off } });
+        out.push(...page);
+        if (page.length < size) return out;
+      }
+    }
+    // 沒指定排序：用 id 遊標分頁，自動確保 select 裡有 id 可以當遊標（即使呼叫端的 select 沒寫 id）。
+    const selectWithId = params.select && !params.select.split(',').includes('id') ? `id,${params.select}` : params.select;
+    const pageParams = { ...params, ...(selectWithId ? { select: selectWithId } : {}), order: 'id' };
+    const fetchPage = async (lastId, triesLeft = 3) => {
+      try { return await rest('GET', table, { params: { ...pageParams, limit: size, ...(lastId === null ? {} : { id: `gt.${lastId}` }) } }); }
       catch (e) {
         if (triesLeft <= 1) throw e;
         await new Promise((r) => setTimeout(r, 400));
-        return fetchPage(offset, triesLeft - 1);
+        return fetchPage(lastId, triesLeft - 1);
       }
     };
-    const CONCURRENCY = 4;
-    const pages = new Array(offsets.length);
-    let next = 0;
-    const workers = Array.from({ length: Math.min(CONCURRENCY, offsets.length) }, async () => {
-      while (next < offsets.length) {
-        const i = next++;
-        pages[i] = await fetchPage(offsets[i]);
-      }
-    });
-    await Promise.all(workers);
-    return data.concat(...pages);
+    const out = [];
+    let lastId = null;
+    for (;;) {
+      const page = await fetchPage(lastId);
+      out.push(...page);
+      if (page.length < size) return out;
+      lastId = page[page.length - 1].id;
+    }
   },
   insert: (table, body) => rest('POST', table, { body, prefer: 'return=representation' }).then((r) => r[0]),
   insertMany: (table, rows) => rest('POST', table, { body: rows, prefer: 'return=minimal' }),
@@ -1060,6 +1061,11 @@ function monthRange(start, end) {
   return out;
 }
 
+// resolveEffectiveVisitRecords／auditCases 只會用到這幾個欄位；content（內容全文）、
+// service_staff、signer 等其他欄位完全沒用到，卻佔了 rk_visits 絕大部分的資料量
+// （訪視內容常常上百字），抓取時用這份清單限制欄位，大幅縮小下載量。
+const RK_VISITS_AUDIT_FIELDS = 'import_id,national_id,name,visit_date,visit_month,content_length,is_phone_visit,is_home_visit';
+
 // 哪個月份該用哪一批匯入的訪視紀錄：依匯入時間排序，每個月份歸屬給涵蓋
 // 該月份的「最新」一批（append-only 設計，不做刪除，見 sql/07_visit_audit.sql 說明）。
 function resolveEffectiveVisitRecords(visits, batches) {
@@ -1335,7 +1341,9 @@ async function loadVisitAudit() {
     db.all('rk_visit_imports', { order: 'imported_at.desc' }),
   ]);
   if (!roster.length || !visitBatches.length) return null;
-  const allVisits = await db.all('rk_visits', {});
+  // 稽核只看這幾個欄位（見 resolveEffectiveVisitRecords/auditCases），content 這種長文字內容欄位
+  // 完全沒用到卻佔了絕大部分資料量，用 select 只抓需要的欄位可以大幅縮小下載量、加快載入。
+  const allVisits = await db.all('rk_visits', { select: RK_VISITS_AUDIT_FIELDS });
   const effective = resolveEffectiveVisitRecords(allVisits, visitBatches);
   const casesByNid = {};
   for (const c of roster) if (c.national_id) casesByNid[c.national_id] = c;
@@ -1544,7 +1552,7 @@ async function loadCaseRosterAudit() {
   const casesByNid = {};
   for (const c of roster) if (c.national_id) casesByNid[c.national_id] = c;
   const unitLabel = makeUnitLabelResolver(abbrs, L.units);
-  const allVisits = visitBatches.length ? await db.all('rk_visits', {}) : [];
+  const allVisits = visitBatches.length ? await db.all('rk_visits', { select: RK_VISITS_AUDIT_FIELDS }) : [];
   const effective = resolveEffectiveVisitRecords(allVisits, visitBatches);
   const todayMonth = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
   const logMonths = effective.map((r) => r.visit_month);
