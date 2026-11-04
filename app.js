@@ -1542,7 +1542,12 @@ function makeUnitLabelResolver(abbrs, referralUnits) {
   };
 }
 
-async function loadCaseRosterAudit() {
+// 拆成兩階段：base（個案清單本身＋小表，約1.5秒）先抓先畫，讓使用者不用等到全部訪視紀錄
+// 抓完就能先看清單、搜尋、點案件；稽核結果（要抓全部 rk_visits，約5秒）在背景另外抓，
+// 算完後才補上最近一次家訪/下次應家訪/缺漏等需要稽核才能算出來的欄位，不擋住第一次畫面。
+const EMPTY_AUDIT = { results: new Map(), logMinMonth: null, logMaxMonth: null, excludedCount: 0 };
+
+async function loadCaseRosterBase() {
   const [roster, visitBatches, abbrs, confirmedInquiries] = await Promise.all([
     db.all('case_roster', {}),
     db.all('rk_visit_imports', { order: 'imported_at.desc' }),
@@ -1552,12 +1557,7 @@ async function loadCaseRosterAudit() {
   const casesByNid = {};
   for (const c of roster) if (c.national_id) casesByNid[c.national_id] = c;
   const unitLabel = makeUnitLabelResolver(abbrs, L.units);
-  const allVisits = visitBatches.length ? await db.all('rk_visits', { select: RK_VISITS_AUDIT_FIELDS }) : [];
-  const effective = resolveEffectiveVisitRecords(allVisits, visitBatches);
   const todayMonth = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
-  const logMonths = effective.map((r) => r.visit_month);
-  const asOfMonth = logMonths.length ? [...logMonths, todayMonth].reduce((a, b) => (a > b ? a : b)) : todayMonth;
-  const audit = effective.length ? auditCases(casesByNid, effective, asOfMonth) : { results: new Map(), logMinMonth: null, logMaxMonth: null, excludedCount: 0 };
   const latestVisitImportAt = visitBatches[0]?.imported_at || null;
   // 「當月簽約數」來源是問案功能（不是個案清單）：成案且簽約日落在本月的筆數，依主責督導歸戶。
   const newCaseCountByName = {};
@@ -1566,7 +1566,16 @@ async function loadCaseRosterAudit() {
     const name = L.staffById[r.lead_staff_id]?.name;
     if (name) newCaseCountByName[name] = (newCaseCountByName[name] || 0) + 1;
   }
-  return { roster, casesByNid, audit, unitLabel, latestVisitImportAt, newCaseCountByName };
+  return { roster, casesByNid, unitLabel, latestVisitImportAt, newCaseCountByName, visitBatches, todayMonth };
+}
+
+async function loadCaseAudit(base) {
+  const { casesByNid, visitBatches, todayMonth } = base;
+  const allVisits = visitBatches.length ? await db.all('rk_visits', { select: RK_VISITS_AUDIT_FIELDS }) : [];
+  const effective = resolveEffectiveVisitRecords(allVisits, visitBatches);
+  const logMonths = effective.map((r) => r.visit_month);
+  const asOfMonth = logMonths.length ? [...logMonths, todayMonth].reduce((a, b) => (a > b ? a : b)) : todayMonth;
+  return effective.length ? auditCases(casesByNid, effective, asOfMonth) : EMPTY_AUDIT;
 }
 
 async function viewCases() {
@@ -1574,14 +1583,21 @@ async function viewCases() {
   <div class="head"><div><h1>個案清單</h1><div class="muted small" style="margin-top:4px">全系統個案主檔，跟「個案比對」每月匯入的快照分開，是持續維護的單一份資料。</div></div></div>
   <div id="cases-body"><p class="muted">載入中…</p></div>`;
   const box = $('#cases-body');
-  let data;
-  try { data = await loadCaseRosterAudit(); } catch (e) { box.innerHTML = `<div class="card"><p class="err-text">${esc(e.message)}</p></div>`; return; }
-  drawCaseRosterTable(box, data);
+  let base;
+  try { base = await loadCaseRosterBase(); } catch (e) { box.innerHTML = `<div class="card"><p class="err-text">${esc(e.message)}</p></div>`; return; }
+  const stillOnThisPage = () => location.hash === '#/cases' && document.body.contains(box);
+  drawCaseRosterTable(box, { ...base, audit: EMPTY_AUDIT, auditLoading: true });
+  try {
+    const audit = await loadCaseAudit(base);
+    if (stillOnThisPage()) drawCaseRosterTable(box, { ...base, audit, auditLoading: false });
+  } catch (e) {
+    if (stillOnThisPage()) toast('缺漏稽核資料載入失敗：' + e.message, true);
+  }
 }
 
 const caseRosterState = { owner: '全部', unit: '全部', status: '全部', onlyIssues: false, q: '', sortBy: null, sortDir: 'asc', statsCollapsed: false };
 function drawCaseRosterTable(box, data) {
-  const { roster, casesByNid, audit, unitLabel, latestVisitImportAt, newCaseCountByName } = data;
+  const { roster, casesByNid, audit, unitLabel, latestVisitImportAt, newCaseCountByName, auditLoading } = data;
   const activeStaffNames = new Set(L.staff.filter((s) => s.active).map((s) => s.name));
   // 督導下拉只留目前在職的人；已離職的督導要找，用搜尋框手動打名字（搜尋框有涵蓋督導員欄位，見下方 q 篩選）。
   const owners = [...new Set(roster.map((c) => c.lead_supervisor).filter(Boolean))].filter((o) => activeStaffNames.has(o)).sort();
@@ -1638,19 +1654,20 @@ function drawCaseRosterTable(box, data) {
     <div class="card" style="margin-bottom:16px;background:var(--accent-l);border:1px solid var(--accent)">
       <div class="small" style="margin-bottom:8px;color:var(--accent-d);font-weight:500">我的個案（${esc(me.name)}）</div>
       <div style="display:flex;flex-wrap:wrap;gap:16px 40px">
-        ${[['列管個案數', myStats.total], ['家訪逾期', myStats.homeOverdue], ['本月電訪缺漏', myStats.phoneMissing], ['案本未繳交', myStats.fileMissing]].map(([k, v]) => `<div><div class="small" style="color:var(--accent-d)">${k}</div><div style="font-size:26px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--accent-d)">${v}</div></div>`).join('')}
+        ${[['列管個案數', myStats.total], ['家訪逾期', auditLoading ? '…' : myStats.homeOverdue], ['本月電訪缺漏', auditLoading ? '…' : myStats.phoneMissing], ['案本未繳交', myStats.fileMissing]].map(([k, v]) => `<div><div class="small" style="color:var(--accent-d)">${k}</div><div style="font-size:26px;font-weight:700;font-variant-numeric:tabular-nums;color:var(--accent-d)">${v}</div></div>`).join('')}
       </div>
     </div>
     <div class="card" style="margin-bottom:16px">
       <div style="display:flex;flex-wrap:wrap;align-items:baseline;gap:8px;margin-bottom:${caseRosterState.statsCollapsed ? '0' : '8px'}">
         <div class="small muted">各督導總覽</div>
-        <div class="small muted" style="margin-left:auto">訪視紀錄資料更新於 ${latestVisitImportAt ? fmtTime(latestVisitImportAt) : '尚無匯入紀錄'}</div>
+        <div class="small muted" style="margin-left:auto">${auditLoading ? '缺漏稽核計算中…' : `訪視紀錄資料更新於 ${latestVisitImportAt ? fmtTime(latestVisitImportAt) : '尚無匯入紀錄'}`}</div>
         <button type="button" class="btn small" id="statsToggle" title="${caseRosterState.statsCollapsed ? '展開' : '縮小'}" style="min-height:auto;padding:2px 10px;font-size:16px;line-height:1">${caseRosterState.statsCollapsed ? '+' : '−'}</button>
       </div>
       ${caseRosterState.statsCollapsed ? '' : `<div class="tbox"><table class="t"><thead><tr><th>督導</th><th class="num">當月簽約數</th><th class="num">列管個案數</th><th class="num">家訪逾期</th><th class="num">本月電訪缺漏</th><th class="num">案本未繳交</th></tr></thead>
-        <tbody>${bySupervisor.map((s) => `<tr${s.owner === me.name ? ' style="background:var(--accent-l)"' : ''}><td>${esc(s.owner)}</td><td class="num">${s.newThisMonth}</td><td class="num">${s.total}</td><td class="num">${s.homeOverdue}</td><td class="num">${s.phoneMissing}</td><td class="num">${s.fileMissing}</td></tr>`).join('') || '<tr><td colspan="6" class="empty">無資料</td></tr>'}</tbody></table></div>`}
+        <tbody>${bySupervisor.map((s) => `<tr${s.owner === me.name ? ' style="background:var(--accent-l)"' : ''}><td>${esc(s.owner)}</td><td class="num">${s.newThisMonth}</td><td class="num">${s.total}</td><td class="num">${auditLoading ? '…' : s.homeOverdue}</td><td class="num">${auditLoading ? '…' : s.phoneMissing}</td><td class="num">${s.fileMissing}</td></tr>`).join('') || '<tr><td colspan="6" class="empty">無資料</td></tr>'}</tbody></table></div>`}
     </div>`}
-    ${!roster.length ? '' : (!audit.logMinMonth ? '<p class="small muted">還沒有匯入過訪視紀錄總表，「最近一次家訪／電訪」欄位暫時顯示尚無資料。到「個案比對」頁面的「家電訪稽核」頁籤可以匯入。</p>'
+    ${!roster.length ? '' : (auditLoading ? '<p class="small" style="color:var(--accent-d)">⏳ 缺漏稽核結果背景計算中…「最近一次家訪／電訪」等欄位會在算完後自動補上，不影響先搜尋、瀏覽個案清單。</p>'
+      : !audit.logMinMonth ? '<p class="small muted">還沒有匯入過訪視紀錄總表，「最近一次家訪／電訪」欄位暫時顯示尚無資料。到「個案比對」頁面的「家電訪稽核」頁籤可以匯入。</p>'
       : `<p class="small muted">訪視紀錄自 <strong>${fmtMonth(audit.logMinMonth)}</strong> 起開始匯入；此前月份不列入缺漏統計。</p>`)}
     <div class="card filters" style="margin:10px 0 16px">
       <label class="inline-check">主責督導 <select id="rfOwner">${opt('全部', '全部', caseRosterState.owner)}${owners.map((o) => opt(o, o, caseRosterState.owner)).join('')}</select></label>
@@ -1675,13 +1692,15 @@ function drawCaseRosterTable(box, data) {
         // 「最近一次家訪」要顯示實際上一次合格家訪的日期（r.lastHomeMonth），不是目前月份的到期狀態
         // ——目前月份狀態（達標/未到期/逾期）另外用小標籤附加在日期後面，不能取代日期本身。
         // 逾期標籤用 position:absolute 靠右貼齊，脫離文字排版流程，讓日期本身不管有沒有標籤都維持置中。
-        const homeCell = !audit.logMinMonth ? '<span class="faint">尚無訪視紀錄</span>'
+        const homeCell = auditLoading ? '<span class="faint">計算中…</span>'
+          : !audit.logMinMonth ? '<span class="faint">尚無訪視紀錄</span>'
           : !r ? '<span class="faint">—</span>'
           : r.lastHomeDate ? `${fmtDate(r.lastHomeDate)}${st?.家訪 === '逾期' ? '<span class="st r-拒絕" style="position:absolute;right:8px;top:50%;transform:translateY(-50%)">逾期</span>' : ''}`
           : st?.家訪 === '資料不足' ? '<span class="chip">尚無訪視歷史</span>'
           : '<span class="st r-拒絕">未收案家訪</span>';
-        const nextDueCell = !audit.logMinMonth || !r ? '<span class="faint">—</span>' : esc(fmtMonth(r.nextDue));
-        const phoneCell = !audit.logMinMonth ? '<span class="faint">尚無訪視紀錄</span>'
+        const nextDueCell = auditLoading ? '<span class="faint">計算中…</span>' : (!audit.logMinMonth || !r ? '<span class="faint">—</span>' : esc(fmtMonth(r.nextDue)));
+        const phoneCell = auditLoading ? '<span class="faint">計算中…</span>'
+          : !audit.logMinMonth ? '<span class="faint">尚無訪視紀錄</span>'
           : !st ? '<span class="faint">—</span>'
           : st.電訪 === '達標' ? fmtDate(st.電訪日期)
           : '<span class="st s-問案中">本月電訪缺漏</span>';
