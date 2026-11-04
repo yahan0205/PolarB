@@ -156,9 +156,15 @@ async function loadLookups() {
     db.all('referral_units', { order: 'sort,name' }), db.all('nc_reasons', { order: 'sort,name' }),
     db.all('reject_reasons', { order: 'sort,name' }), db.all('special_conditions', { order: 'sort,name' }),
     db.all('service_codes', { order: 'sort,name' }),
-    db.all('caregivers', { order: 'name' }), db.all('staff', { order: 'name' }),
+    db.all('caregivers', { order: 'name' }), db.all('staff', { order: 'code,name' }),
   ]);
   const byId = (a) => Object.fromEntries(a.map((x) => [x.id, x]));
+  // 督導下拉選單順序：先新莊（依員編）、後淡水（依員編），跟 REGIONS 的區域順序一致；
+  // 區域是 null 的（還沒設定區域）排最後。
+  staff.sort((a, b) => {
+    const ra = REGIONS.indexOf(a.region), rb = REGIONS.indexOf(b.region);
+    return (ra < 0 ? 99 : ra) - (rb < 0 ? 99 : rb) || (a.code || '').localeCompare(b.code || '') || a.name.localeCompare(b.name);
+  });
   L = { units, nc, rj, cond, sc, cg, staff, unitById: byId(units), ncById: byId(nc), rjById: byId(rj), condById: byId(cond), scById: byId(sc), cgById: byId(cg), staffById: byId(staff) };
 }
 
