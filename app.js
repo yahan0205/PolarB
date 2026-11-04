@@ -1894,17 +1894,17 @@ const ADMIN_TABS = {
 async function viewAdmin(tab) {
   if (!ADMIN_TABS[tab]) tab = 'units';
   const T = ADMIN_TABS[tab];
-  const rows = await db.all(T.table, { order: tab === 'cg' || tab === 'staff' ? 'active.desc,region,name' : 'active.desc,sort,name' });
+  const rows = await db.all(T.table, { order: tab === 'cg' || tab === 'staff' ? 'active.desc,code,name' : 'active.desc,sort,name' });
   const isOpt = !['cg', 'staff', 'sc'].includes(tab);
   const regionSel = (name, cur) => `<select name="${name}">${opt('', '—', cur)}${REGIONS.map((r) => opt(r, r, cur)).join('')}</select>`;
   const roleSel = (cur) => `<select name="role">${[['supervisor', '督導'], ['director', '主任'], ['admin', '管理者']].map(([v, l]) => opt(v, l, cur)).join('')}</select>`;
   const head = isOpt ? '<th>名稱</th><th style="width:110px">排序</th>'
     : tab === 'sc' ? '<th style="width:110px">代碼</th><th>名稱</th><th style="width:110px">排序</th>'
-      : tab === 'cg' ? '<th style="width:130px">員編</th><th>姓名</th><th style="width:130px">區域</th>' : '<th>姓名</th><th style="width:130px">區域</th><th style="width:130px">角色</th><th>登入帳號</th>';
+      : tab === 'cg' ? '<th style="width:130px">員編</th><th>姓名</th><th style="width:130px">區域</th>' : '<th style="width:130px">員編</th><th>姓名</th><th style="width:130px">區域</th><th style="width:130px">角色</th><th>登入帳號</th>';
   const cells = (r) => isOpt ? `<td><input type="text" name="name" value="${esc(r.name)}" aria-label="名稱"></td><td><input type="number" name="sort" value="${r.sort}" aria-label="排序"></td>`
     : tab === 'sc' ? `<td><input type="text" name="code" value="${esc(r.code || '')}" aria-label="代碼"></td><td><input type="text" name="name" value="${esc(r.name)}" aria-label="名稱"></td><td><input type="number" name="sort" value="${r.sort}" aria-label="排序"></td>`
       : tab === 'cg' ? `<td><input type="text" name="code" value="${esc(r.code || '')}" aria-label="員編"></td><td><input type="text" name="name" value="${esc(r.name)}" aria-label="姓名"></td><td>${regionSel('region', r.region)}</td>`
-        : `<td><input type="text" name="name" value="${esc(r.name)}" aria-label="姓名"></td><td>${regionSel('region', r.region)}</td><td>${roleSel(r.role)}</td><td class="small">${r.user_id ? '已連結' : '<span class="faint">未連結</span>'}</td>`;
+        : `<td><input type="text" name="code" value="${esc(r.code || '')}" aria-label="員編"></td><td><input type="text" name="name" value="${esc(r.name)}" aria-label="姓名"></td><td>${regionSel('region', r.region)}</td><td>${roleSel(r.role)}</td><td class="small">${r.user_id ? '已連結' : '<span class="faint">未連結</span>'}</td>`;
   $('#main').innerHTML = `
   <div class="head"><div><h1>管理</h1><div class="muted small" style="margin-top:4px">選項不刪除，不用的改成停用；停用後不會出現在下拉選單，但舊紀錄仍保留。</div></div></div>
   <nav class="tabs" aria-label="管理項目">${Object.entries(ADMIN_TABS).map(([k, v]) => `<a href="#/admin/${k}" class="${k === tab ? 'on' : ''}">${v.label}</a>`).join('')}</nav>
@@ -1920,7 +1920,7 @@ async function viewAdmin(tab) {
     if (isOpt || tab === 'sc') b.sort = Number($('[name=sort]', tr).value) || 0;
     if (tab === 'sc') b.code = $('[name=code]', tr).value.trim() || null;
     if (tab === 'cg') { b.code = $('[name=code]', tr).value.trim() || null; b.region = $('[name=region]', tr).value || null; }
-    if (tab === 'staff') { b.region = $('[name=region]', tr).value || null; b.role = $('[name=role]', tr).value; }
+    if (tab === 'staff') { b.code = $('[name=code]', tr).value.trim() || null; b.region = $('[name=region]', tr).value || null; b.role = $('[name=role]', tr).value; }
     return b;
   };
   $$('[data-save]').forEach((btn) => (btn.onclick = async () => {
