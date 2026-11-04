@@ -19,6 +19,9 @@ const rocYear = (iso) => (iso ? Number(iso.slice(0, 4)) - 1911 : null);
 const fmtDate = (iso) => (iso ? `${rocYear(iso)}/${iso.slice(5, 7)}/${iso.slice(8, 10)}` : '');
 const fmtMD = (iso) => (iso ? `${Number(iso.slice(5, 7))}/${Number(iso.slice(8, 10))}` : '');
 const fmtTime = (ts) => { if (!ts) return ''; const d = new Date(ts); return `${d.getFullYear() - 1911}/${String(d.getMonth() + 1).padStart(2, '0')}/${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
+// 系統內所有日期統一民國年；月份字串（YYYY-MM，例如 auditCases() 用的 visit_month/nextDue）轉成「民國年/MM」，
+// 不是這個格式的字串（例如「尚無訪視歷史」這種文字狀態）原樣輸出，不強制轉換。
+const fmtMonth = (ym) => { if (!ym || !/^\d{4}-\d{2}$/.test(ym)) return ym || ''; const [y, m] = ym.split('-'); return `${Number(y) - 1911}/${m}`; };
 const opt = (v, label, sel) => `<option value="${esc(v)}"${String(v) === String(sel ?? '') ? ' selected' : ''}>${esc(label)}</option>`;
 const REGIONS = ['新莊', '淡水'];
 const STATUSES = ['問案中', '成案', '未成案'];
@@ -1335,7 +1338,7 @@ async function drawVisitList(box, audit) {
     <tbody>${items.map((it) => {
       const key = `${it.r.nationalId}|${it.m}|${it.type}`;
       const n = noteMap.get(key);
-      return `<tr><td class="nowrap">${esc(it.r.owner)}</td><td class="nowrap">${esc(it.r.name)}</td><td class="nowrap">${it.m}</td>
+      return `<tr><td class="nowrap">${esc(it.r.owner)}</td><td class="nowrap">${esc(it.r.name)}</td><td class="nowrap">${fmtMonth(it.m)}</td>
         <td><span class="st ${it.type === '家訪逾期' ? 'r-拒絕' : 's-問案中'}">${it.type}</span></td>
         <td><input type="text" class="vnote" data-nid="${esc(it.r.nationalId)}" data-m="${it.m}" data-type="${esc(it.type)}" value="${esc(n?.note || '')}" placeholder="例：已電聯家屬確認" style="width:100%"></td></tr>`;
     }).join('') || '<tr><td colspan="5" class="empty">目前沒有缺漏項目。</td></tr>'}</tbody></table></div>`;
@@ -1355,21 +1358,37 @@ async function drawVisitList(box, audit) {
 function drawVisitStats(box, audit) {
   const { results } = audit;
   const agg = new Map();
+  const allMonthsSet = new Set();
   for (const r of results.values()) {
-    if (!agg.has(r.owner)) agg.set(r.owner, { cases: 0, phoneMissing: 0, homeMissing: 0, homeOverdue: 0, unlisted: 0 });
+    if (!agg.has(r.owner)) agg.set(r.owner, { cases: 0, phoneMissing: 0, homeMissing: 0, homeOverdue: 0, unlisted: 0, byMonth: new Map() });
     const a = agg.get(r.owner);
     a.cases++;
     if (!r.inRoster) a.unlisted++;
     for (const m of r.months) {
+      allMonthsSet.add(m);
       const st = r.monthStatus[m];
-      if (st.電訪 === '缺漏') a.phoneMissing++;
-      if (st.家訪 === '缺漏(未收案家訪)') a.homeMissing++;
-      else if (st.家訪 === '逾期') a.homeOverdue++;
+      let issue = 0;
+      if (st.電訪 === '缺漏') { a.phoneMissing++; issue++; }
+      if (st.家訪 === '缺漏(未收案家訪)') { a.homeMissing++; issue++; }
+      else if (st.家訪 === '逾期') { a.homeOverdue++; issue++; }
+      if (issue) a.byMonth.set(m, (a.byMonth.get(m) || 0) + issue);
     }
   }
   const owners = [...agg.keys()].sort();
-  box.innerHTML = `<div class="tbox"><table class="t"><thead><tr><th>主責督導</th><th class="num">列管個案數</th><th class="num">電訪缺漏筆數</th><th class="num">家訪缺漏筆數</th><th class="num">家訪逾期筆數</th><th class="num">個案清單未列名</th></tr></thead>
-    <tbody>${owners.map((o) => { const a = agg.get(o); return `<tr><td>${esc(o)}</td><td class="num">${a.cases}</td><td class="num">${a.phoneMissing}</td><td class="num">${a.homeMissing}</td><td class="num">${a.homeOverdue}</td><td class="num">${a.unlisted}</td></tr>`; }).join('') || '<tr><td colspan="6" class="empty">無資料</td></tr>'}</tbody></table></div>`;
+  // 每個居督每年每月的缺漏情形：每月初核對上個月的狀況時，直接從這張表看哪個督導哪個月有缺漏。
+  const allMonths = [...allMonthsSet].sort();
+  box.innerHTML = `
+  <div class="tbox" style="margin-bottom:16px"><table class="t"><thead><tr><th>主責督導</th><th class="num">列管個案數</th><th class="num">電訪缺漏筆數</th><th class="num">家訪缺漏筆數</th><th class="num">家訪逾期筆數</th><th class="num">個案清單未列名</th></tr></thead>
+    <tbody>${owners.map((o) => { const a = agg.get(o); return `<tr><td>${esc(o)}</td><td class="num">${a.cases}</td><td class="num">${a.phoneMissing}</td><td class="num">${a.homeMissing}</td><td class="num">${a.homeOverdue}</td><td class="num">${a.unlisted}</td></tr>`; }).join('') || '<tr><td colspan="6" class="empty">無資料</td></tr>'}</tbody></table></div>
+  <div class="small muted" style="margin-bottom:8px">各督導每月缺漏情形（家訪缺漏＋家訪逾期＋電訪缺漏加總），方便每月初核對上個月狀況</div>
+  <div class="tbox"><table class="t"><thead><tr><th>督導</th>${allMonths.map((m) => `<th class="num">${fmtMonth(m)}</th>`).join('')}</tr></thead>
+    <tbody>${owners.map((o) => {
+      const a = agg.get(o);
+      return `<tr><td class="nowrap">${esc(o)}</td>${allMonths.map((m) => {
+        const v = a.byMonth.get(m) || 0;
+        return `<td class="num"${v ? ' style="color:var(--bad);font-weight:600"' : ''}>${v || ''}</td>`;
+      }).join('')}</tr>`;
+    }).join('') || `<tr><td colspan="${allMonths.length + 1}" class="empty">無資料</td></tr>`}</tbody></table></div>`;
 }
 
 function drawVisitImport(box) {
@@ -1400,7 +1419,7 @@ function drawVisitImport(box) {
           er.hidden = false;
         } else {
           $('#vPreview').innerHTML = `<div class="card small" style="margin-top:8px">
-            共 ${parsed.total} 筆，可匯入 ${parsed.usable.length} 筆，略過 ${parsed.skipped} 筆（缺身分證字號或訪視日期）。涵蓋月份：${esc(parsed.monthsCovered.join('、') || '—')}
+            共 ${parsed.total} 筆，可匯入 ${parsed.usable.length} 筆，略過 ${parsed.skipped} 筆（缺身分證字號或訪視日期）。涵蓋月份：${esc(parsed.monthsCovered.map(fmtMonth).join('、') || '—')}
           </div>`;
           $('#vImport').hidden = false;
         }
@@ -1434,7 +1453,7 @@ function drawVisitImport(box) {
 async function drawVisitImportHistory(box) {
   const rows = await db.all('rk_visit_imports', { order: 'imported_at.desc' });
   box.innerHTML = `<div class="tbox"><table class="t"><thead><tr><th>匯入時間</th><th>標籤</th><th>匯入者</th><th>檔名</th><th>涵蓋月份</th><th class="num">筆數</th><th class="num">略過</th><th></th></tr></thead>
-    <tbody>${rows.map((r) => `<tr><td>${fmtTime(r.imported_at)}</td><td>${esc(r.period || '')}</td><td>${esc(r.imported_by_name || '')}</td><td class="small muted">${esc(r.file_name || '')}</td><td class="small">${esc((r.months_covered || []).join('、'))}</td><td class="num">${r.row_count}</td><td class="num">${r.skipped_count}</td><td>${isDirector() ? `<button type="button" class="link" style="color:var(--bad)" data-vdel="${r.id}">刪除</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="8" class="empty">還沒有匯入紀錄</td></tr>'}</tbody></table></div>`;
+    <tbody>${rows.map((r) => `<tr><td>${fmtTime(r.imported_at)}</td><td>${esc(r.period || '')}</td><td>${esc(r.imported_by_name || '')}</td><td class="small muted">${esc(r.file_name || '')}</td><td class="small">${esc((r.months_covered || []).map(fmtMonth).join('、'))}</td><td class="num">${r.row_count}</td><td class="num">${r.skipped_count}</td><td>${isDirector() ? `<button type="button" class="link" style="color:var(--bad)" data-vdel="${r.id}">刪除</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="8" class="empty">還沒有匯入紀錄</td></tr>'}</tbody></table></div>`;
   $$('[data-vdel]').forEach((b) => (b.onclick = async () => {
     if (!(await confirmBox('確定要刪除這批訪視紀錄嗎？無法復原。', '刪除', true))) return;
     try { await db.remove('rk_visit_imports', Number(b.dataset.vdel)); toast('已刪除'); viewCaseCheck(); } catch (e) { toast(e.message, true); }
@@ -1509,15 +1528,21 @@ function drawCaseRosterTable(box, data) {
     const lastMonth = r ? r.months[r.months.length - 1] : null;
     return lastMonth ? r.monthStatus[lastMonth] : null;
   };
-  const computeStats = (cases) => ({
-    total: cases.length,
-    homeOverdue: cases.filter((c) => lastStatusOf(c)?.家訪 === '逾期').length,
-    phoneMissing: cases.filter((c) => lastStatusOf(c)?.電訪 === '缺漏').length,
-    fileMissing: cases.filter((c) => !c.file_status).length,
-  });
+  // 列管個案數（以及其他統計）只算服務中、暫停的案子，已結案的不列計——結案的個案不算「目前在管」。
+  const computeStats = (cases) => {
+    const active = cases.filter((c) => c.status === '服務中' || c.status === '暫停');
+    return {
+      total: active.length,
+      homeOverdue: active.filter((c) => lastStatusOf(c)?.家訪 === '逾期').length,
+      phoneMissing: active.filter((c) => lastStatusOf(c)?.電訪 === '缺漏').length,
+      fileMissing: active.filter((c) => !c.file_status).length,
+    };
+  };
   const myCases = roster.filter((c) => c.lead_supervisor === me.name);
   const myStats = computeStats(myCases);
-  const bySupervisor = owners.map((o) => ({ owner: o, newThisMonth: newCaseCountByName[o] || 0, ...computeStats(roster.filter((c) => c.lead_supervisor === o)) }));
+  // 各督導總覽依缺漏數量（家訪逾期+本月電訪缺漏）由多到少排序，缺漏越多的排越上面。
+  const bySupervisor = owners.map((o) => ({ owner: o, newThisMonth: newCaseCountByName[o] || 0, ...computeStats(roster.filter((c) => c.lead_supervisor === o)) }))
+    .sort((a, b) => (b.homeOverdue + b.phoneMissing) - (a.homeOverdue + a.phoneMissing));
   const draw = () => {
     const q = caseRosterState.q.trim().toLowerCase();
     const filtered = roster.filter((c) => (caseRosterState.owner === '全部' || c.lead_supervisor === caseRosterState.owner)
@@ -1560,7 +1585,7 @@ function drawCaseRosterTable(box, data) {
         <tbody>${bySupervisor.map((s) => `<tr${s.owner === me.name ? ' style="background:var(--accent-l)"' : ''}><td>${esc(s.owner)}</td><td class="num">${s.newThisMonth}</td><td class="num">${s.total}</td><td class="num">${s.homeOverdue}</td><td class="num">${s.phoneMissing}</td><td class="num">${s.fileMissing}</td></tr>`).join('') || '<tr><td colspan="6" class="empty">無資料</td></tr>'}</tbody></table></div>`}
     </div>`}
     ${!roster.length ? '' : (!audit.logMinMonth ? '<p class="small muted">還沒有匯入過訪視紀錄總表，「最近一次家訪／電訪」欄位暫時顯示尚無資料。到「個案比對」頁面的「家電訪稽核」頁籤可以匯入。</p>'
-      : `<p class="small muted">訪視紀錄自 <strong>${audit.logMinMonth}</strong> 起開始匯入；此前月份不列入缺漏統計。</p>`)}
+      : `<p class="small muted">訪視紀錄自 <strong>${fmtMonth(audit.logMinMonth)}</strong> 起開始匯入；此前月份不列入缺漏統計。</p>`)}
     <div class="card filters" style="margin:10px 0 16px">
       <label class="inline-check">主責督導 <select id="rfOwner">${opt('全部', '全部', caseRosterState.owner)}${owners.map((o) => opt(o, o, caseRosterState.owner)).join('')}</select></label>
       <label class="inline-check">A單位 <select id="rfUnit">${opt('全部', '全部', caseRosterState.unit)}${units.map((u) => opt(u, unitLabel(u), caseRosterState.unit)).join('')}</select></label>
@@ -1589,7 +1614,7 @@ function drawCaseRosterTable(box, data) {
           : r.lastHomeDate ? `${fmtDate(r.lastHomeDate)}${st?.家訪 === '逾期' ? '<span class="st r-拒絕" style="position:absolute;right:8px;top:50%;transform:translateY(-50%)">逾期</span>' : ''}`
           : st?.家訪 === '資料不足' ? '<span class="chip">尚無訪視歷史</span>'
           : '<span class="st r-拒絕">未收案家訪</span>';
-        const nextDueCell = !audit.logMinMonth || !r ? '<span class="faint">—</span>' : esc(r.nextDue);
+        const nextDueCell = !audit.logMinMonth || !r ? '<span class="faint">—</span>' : esc(fmtMonth(r.nextDue));
         const phoneCell = !audit.logMinMonth ? '<span class="faint">尚無訪視紀錄</span>'
           : !st ? '<span class="faint">—</span>'
           : st.電訪 === '達標' ? fmtDate(st.電訪日期)
@@ -1654,18 +1679,28 @@ async function toggleFileStatus(c) {
 
 function openCaseDetailModal(c, r) {
   if (!c) return;
+  // 警示：只要有任一個月家訪逾期/缺漏，或電訪缺漏，就在最上方用明顯的紅色提示條列出來，
+  // 不用把整張逐月表格看完才發現有問題。
+  const issueMonths = r ? r.months.filter((m) => {
+    const st = r.monthStatus[m];
+    return st.家訪 === '逾期' || st.家訪 === '缺漏(未收案家訪)' || st.電訪 === '缺漏';
+  }) : [];
+  const warningHtml = issueMonths.length
+    ? `<p class="small" style="color:var(--bad);background:var(--bad-bg);padding:8px 12px;border-radius:8px;margin:8px 0 0">⚠ 開始服務後共有 ${issueMonths.length} 個月家訪逾期／缺漏或電訪缺漏，詳見下方逐月狀態</p>`
+    : (r ? `<p class="small" style="color:var(--ok);background:var(--ok-bg);padding:8px 12px;border-radius:8px;margin:8px 0 0">✓ 開始服務後的家訪／電訪紀錄目前沒有缺漏或逾期</p>` : '');
   const monthsHtml = r ? `<div class="tbox" style="max-height:50vh;overflow:auto;margin-top:10px"><table class="t"><thead><tr><th>月份</th><th>家訪</th><th>電訪</th></tr></thead>
       <tbody>${r.months.map((m) => {
         const st = r.monthStatus[m];
         const homeText = st.家訪 === '達標' ? `達標（${fmtDate(st.家訪日期)}）` : st.家訪;
         const phoneText = st.電訪 === '達標' ? `達標（${fmtDate(st.電訪日期)}）` : st.電訪;
-        return `<tr><td>${m}</td><td>${esc(homeText)}</td><td>${esc(phoneText)}</td></tr>`;
-      }).join('')}</tbody></table></div>${r.blankMonths.length ? `<p class="small" style="color:var(--warn);margin-top:10px">以下月份有紀錄但內容不足 30 字、未採計：${esc(r.blankMonths.join('、'))}</p>` : ''}`
+        return `<tr><td>${fmtMonth(m)}</td><td>${esc(homeText)}</td><td>${esc(phoneText)}</td></tr>`;
+      }).join('')}</tbody></table></div>${r.blankMonths.length ? `<p class="small" style="color:var(--warn);margin-top:10px">以下月份有紀錄但內容不足 30 字、未採計：${esc(r.blankMonths.map(fmtMonth).join('、'))}</p>` : ''}`
     : '<p class="small muted" style="margin-top:10px">還沒有訪視紀錄可供比對。</p>';
   modal(`<h2>${esc(c.name)}</h2>
     <p class="small muted" style="margin:4px 0 10px">案號 ${esc(c.case_no)}　身分證字號 ${esc(c.national_id)}　主責督導 ${esc(c.lead_supervisor)}　A單位 ${esc(c.unit_name)}　狀態 ${esc(c.status)}</p>
     <div class="inline-check">案本：<span id="cdFile">${c.file_status ? '✓ 已繳交' : '未繳交'}</span>${c.file_updated_by_name ? `<span class="small muted"> （${esc(c.file_updated_by_name)} ${fmtTime(c.file_updated_at)}）</span>` : ''}
       ${isDirector() ? '<button type="button" class="link" data-ftoggle2 style="margin-left:8px">切換</button>' : ''}</div>
+    ${warningHtml}
     ${monthsHtml}
     <div class="acts"><button type="button" class="btn" data-no>關閉</button></div>`,
   (m, close) => {
