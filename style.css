@@ -82,8 +82,11 @@ legend { font-size: 13px; color: var(--ink2); padding: 0; margin-bottom: 6px; }
 .filters select { width: auto; }
 
 /* tables */
-.tbox { background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow-x: auto; }
+/* 表格盒子本身設定上限高度＋可捲動，讓表頭用 position:sticky 固定在表格可視範圍最上方，
+   不管捲多下面都看得到欄位名稱是什麼（捲動的是 .tbox 內部，不是整個網頁）。 */
+.tbox { background: var(--card); border: 1px solid var(--line); border-radius: 12px; overflow: auto; max-height: 72vh; }
 table.t { width: 100%; border-collapse: collapse; }
+table.t thead { position: sticky; top: 0; z-index: 2; }
 table.t th { font-weight: 500; text-align: left; font-size: 13px; color: var(--muted); padding: 10px 12px; border-bottom: 1px solid var(--line); white-space: nowrap; background: #FAFBF9; }
 table.t td { padding: 11px 12px; border-bottom: 1px solid var(--line2); font-size: 14px; vertical-align: top; }
 table.t tr:last-child td { border-bottom: 0; }
