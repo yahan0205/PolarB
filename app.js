@@ -1596,6 +1596,58 @@ async function viewCases() {
 }
 
 const caseRosterState = { owner: '全部', unit: '全部', status: '全部', onlyIssues: false, q: '', sortBy: null, sortDir: 'asc', statsCollapsed: false };
+
+// 個案清單欄位顯示設定：案號／姓名一定顯示，其他欄位可以勾選隱藏。設定記在這台電腦
+// 的瀏覽器、依登入帳號分開（跟新北 A 個管系統那套邏輯一樣），不影響其他同仁、也不會
+// 存進資料庫，預設全部顯示。
+const ROSTER_COLUMNS = [
+  { key: 'case_no', label: '案號', width: '90px', pinned: true },
+  { key: 'name', label: '姓名', width: '80px', pinned: true },
+  { key: 'national_id', label: '身分證字號', width: '110px' },
+  { key: 'lead_supervisor', label: '督導員', width: '80px' },
+  { key: 'unit_name', label: 'A單位名稱', width: '100px' },
+  { key: 'service_start_date', label: '開始服務日', width: '100px' },
+  { key: 'end_date', label: '結案日', width: '100px' },
+  { key: 'status', label: '狀態', width: '70px' },
+  { key: 'home_visit', label: '最近一次家訪', width: '130px' },
+  { key: 'next_due', label: '下次應家訪日', width: '100px' },
+  { key: 'phone_visit', label: '最近一次電訪', width: '120px' },
+  { key: 'file_status', label: '案本', width: '90px' },
+];
+const rosterColumnsKey = () => `bole.rosterColumns.${me?.id || 'anon'}`;
+function loadRosterColumns() {
+  const saved = store.get(rosterColumnsKey());
+  const allKeys = ROSTER_COLUMNS.map((c) => c.key);
+  if (!saved || !Array.isArray(saved)) return new Set(allKeys);
+  const keep = new Set(saved.filter((k) => allKeys.includes(k)));
+  ROSTER_COLUMNS.filter((c) => c.pinned).forEach((c) => keep.add(c.key));
+  return keep;
+}
+function saveRosterColumns(visibleSet) {
+  store.set(rosterColumnsKey(), [...visibleSet]);
+}
+function openRosterColumnPicker(visibleSet, onSave) {
+  modal(`<h2>個案清單要顯示的欄位</h2>
+    <p class="small muted" style="margin:4px 0 10px">勾選要在個案清單看到的欄位（姓名、案號一定會顯示），設定記在這台電腦的瀏覽器，依登入帳號分開，不影響其他同仁。</p>
+    <div class="checks">${ROSTER_COLUMNS.map((c) => `<label${c.pinned ? ' title="一定會顯示"' : ''}><input type="checkbox" name="rc" value="${c.key}" ${visibleSet.has(c.key) ? 'checked' : ''} ${c.pinned ? 'checked disabled' : ''}>${esc(c.label)}</label>`).join('')}</div>
+    <div class="acts" style="justify-content:space-between">
+      <div><button type="button" class="link" data-all>全選</button> <button type="button" class="link" data-none>全不選</button> <button type="button" class="link" data-reset>恢復預設</button></div>
+      <div><button type="button" class="btn" data-no>取消</button><button type="button" class="btn primary" data-yes>儲存</button></div>
+    </div>`,
+  (m, close) => {
+    const boxes = () => $$('input[name=rc]', m);
+    $('[data-all]', m).onclick = () => boxes().forEach((b) => { if (!b.disabled) b.checked = true; });
+    $('[data-none]', m).onclick = () => boxes().forEach((b) => { if (!b.disabled) b.checked = false; });
+    $('[data-reset]', m).onclick = () => boxes().forEach((b) => (b.checked = true));
+    $('[data-no]', m).onclick = close;
+    $('[data-yes]', m).onclick = () => {
+      const next = new Set(boxes().filter((b) => b.checked).map((b) => b.value));
+      saveRosterColumns(next);
+      close();
+      onSave(next);
+    };
+  });
+}
 function drawCaseRosterTable(box, data) {
   const { roster, casesByNid, audit, unitLabel, latestVisitImportAt, newCaseCountByName, auditLoading } = data;
   const activeStaffNames = new Set(L.staff.filter((s) => s.active).map((s) => s.name));
@@ -1626,6 +1678,8 @@ function drawCaseRosterTable(box, data) {
   const bySupervisor = owners.map((o) => ({ owner: o, newThisMonth: newCaseCountByName[o] || 0, ...computeStats(roster.filter((c) => c.lead_supervisor === o)) }))
     .sort((a, b) => (b.homeOverdue + b.phoneMissing) - (a.homeOverdue + a.phoneMissing));
   const draw = () => {
+    const visibleCols = loadRosterColumns();
+    const colVisible = (key) => visibleCols.has(key);
     const q = caseRosterState.q.trim().toLowerCase();
     const filtered = roster.filter((c) => (caseRosterState.owner === '全部' || c.lead_supervisor === caseRosterState.owner)
       && (caseRosterState.unit === '全部' || c.unit_name === caseRosterState.unit)
@@ -1675,19 +1729,16 @@ function drawCaseRosterTable(box, data) {
       <label class="inline-check">狀態 <select id="rfStatus">${['全部', '服務中', '暫停', '結案'].map((s) => opt(s, s, caseRosterState.status)).join('')}</select></label>
       <label class="inline-check"><input type="checkbox" id="rfIssue" ${caseRosterState.onlyIssues ? 'checked' : ''}>只顯示有缺漏/逾期</label>
       <input type="search" class="grow" id="rfQ" placeholder="搜尋案號、姓名、身分證字號、督導員（含已離職）" value="${esc(caseRosterState.q)}">
+      <button type="button" class="btn small" id="rfColumns">⚙ 欄位</button>
     </div>
     <div class="muted small" style="margin-bottom:8px">共 ${shown.length} 筆${roster.length ? '' : '（個案清單還沒有資料，請管理者到下方「重新整理個案清單」匯入）'}</div>
     <div class="tbox"><table class="t roster">
-      <colgroup>
-        <col style="width:90px"><col style="width:80px"><col style="width:110px"><col style="width:80px">
-        <col style="width:100px"><col style="width:100px"><col style="width:100px"><col style="width:70px">
-        <col style="width:130px"><col style="width:100px"><col style="width:120px"><col style="width:90px">
-      </colgroup>
-      <thead><tr>
-      <th id="th-caseno" style="cursor:pointer;user-select:none" title="點擊排序">案號 ${sortIcon('case_no')}</th>
-      <th>姓名</th><th>身分證字號</th><th>督導員</th><th>A單位名稱</th>
-      <th id="th-startdate" style="cursor:pointer;user-select:none" title="點擊排序">開始服務日 ${sortIcon('service_start_date')}</th>
-      <th>結案日</th><th>狀態</th><th>最近一次家訪</th><th>下次應家訪日</th><th>最近一次電訪</th><th>案本</th></tr></thead>
+      <colgroup>${ROSTER_COLUMNS.filter((col) => colVisible(col.key)).map((col) => `<col style="width:${col.width}">`).join('')}</colgroup>
+      <thead><tr>${ROSTER_COLUMNS.filter((col) => colVisible(col.key)).map((col) => {
+        if (col.key === 'case_no') return `<th id="th-caseno" style="cursor:pointer;user-select:none" title="點擊排序">案號 ${sortIcon('case_no')}</th>`;
+        if (col.key === 'service_start_date') return `<th id="th-startdate" style="cursor:pointer;user-select:none" title="點擊排序">開始服務日 ${sortIcon('service_start_date')}</th>`;
+        return `<th>${esc(col.label)}</th>`;
+      }).join('')}</tr></thead>
       <tbody>${shown.map(({ c, r, st }) => {
         // 「最近一次家訪」要顯示實際上一次合格家訪的日期（r.lastHomeMonth），不是目前月份的到期狀態
         // ——目前月份狀態（達標/未到期/逾期）另外用小標籤附加在日期後面，不能取代日期本身。
@@ -1705,29 +1756,31 @@ function drawCaseRosterTable(box, data) {
           : st.電訪 === '達標' ? fmtDate(st.電訪日期)
           : '<span class="st s-問案中">本月電訪缺漏</span>';
         const fileCell = fileCellHtml(c, r);
-        return `<tr class="click" data-crow="${esc(c.national_id || '')}" data-cid="${c.id}">
-          <td class="nowrap">${esc(c.case_no)}</td>
-          <td class="nowrap">${esc(c.name)}</td>
-          <td class="nowrap">${esc(c.national_id)}</td>
-          <td class="nowrap">${esc(c.lead_supervisor)}</td>
-          <td class="nowrap"><span class="ellip" title="${esc(c.unit_name)}">${esc(unitLabel(c.unit_name))}</span></td>
-          <td class="nowrap">${fmtDate(c.service_start_date)}</td>
-          <td class="nowrap">${fmtDate(c.end_date)}</td>
-          <td>${esc(c.status)}</td>
-          <td class="nowrap" style="position:relative">${homeCell}</td>
-          <td class="nowrap small">${nextDueCell}</td>
-          <td class="nowrap">${phoneCell}</td>
-          <td class="nowrap">${fileCell}</td>
-        </tr>`;
-      }).join('') || '<tr><td colspan="12" class="empty">沒有符合條件的個案</td></tr>'}</tbody></table></div>
+        const cellByKey = {
+          case_no: `<td class="nowrap">${esc(c.case_no)}</td>`,
+          name: `<td class="nowrap">${esc(c.name)}</td>`,
+          national_id: `<td class="nowrap">${esc(c.national_id)}</td>`,
+          lead_supervisor: `<td class="nowrap">${esc(c.lead_supervisor)}</td>`,
+          unit_name: `<td class="nowrap"><span class="ellip" title="${esc(c.unit_name)}">${esc(unitLabel(c.unit_name))}</span></td>`,
+          service_start_date: `<td class="nowrap">${fmtDate(c.service_start_date)}</td>`,
+          end_date: `<td class="nowrap">${fmtDate(c.end_date)}</td>`,
+          status: `<td>${esc(c.status)}</td>`,
+          home_visit: `<td class="nowrap" style="position:relative">${homeCell}</td>`,
+          next_due: `<td class="nowrap small">${nextDueCell}</td>`,
+          phone_visit: `<td class="nowrap">${phoneCell}</td>`,
+          file_status: `<td class="nowrap">${fileCell}</td>`,
+        };
+        return `<tr class="click" data-crow="${esc(c.national_id || '')}" data-cid="${c.id}">${ROSTER_COLUMNS.filter((col) => colVisible(col.key)).map((col) => cellByKey[col.key]).join('')}</tr>`;
+      }).join('') || `<tr><td colspan="${ROSTER_COLUMNS.filter((col) => colVisible(col.key)).length}" class="empty">沒有符合條件的個案</td></tr>`}</tbody></table></div>
     ${isDirector() ? `<details style="margin-top:20px"><summary class="btn" style="display:inline-flex;width:fit-content;cursor:pointer">重新整理個案清單（上傳最新個案總表）</summary><div id="cr-import" style="margin-top:12px"></div></details>` : ''}`;
     const toggleSort = (field) => {
       if (caseRosterState.sortBy === field) caseRosterState.sortDir = caseRosterState.sortDir === 'asc' ? 'desc' : 'asc';
       else { caseRosterState.sortBy = field; caseRosterState.sortDir = 'asc'; }
       draw();
     };
-    $('#th-caseno').onclick = () => toggleSort('case_no');
-    $('#th-startdate').onclick = () => toggleSort('service_start_date');
+    $('#rfColumns').onclick = () => openRosterColumnPicker(visibleCols, () => draw());
+    $('#th-caseno')?.addEventListener('click', () => toggleSort('case_no'));
+    $('#th-startdate')?.addEventListener('click', () => toggleSort('service_start_date'));
     $('#statsToggle')?.addEventListener('click', () => { caseRosterState.statsCollapsed = !caseRosterState.statsCollapsed; draw(); });
     $('#rfOwner').onchange = (e) => { caseRosterState.owner = e.target.value; draw(); };
     $('#rfUnit').onchange = (e) => { caseRosterState.unit = e.target.value; draw(); };
