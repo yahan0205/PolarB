@@ -1786,7 +1786,30 @@ function drawCaseRosterTable(box, data) {
     $('#rfUnit').onchange = (e) => { caseRosterState.unit = e.target.value; draw(); };
     $('#rfStatus').onchange = (e) => { caseRosterState.status = e.target.value; draw(); };
     $('#rfIssue').onchange = (e) => { caseRosterState.onlyIssues = e.target.checked; draw(); };
-    $('#rfQ').oninput = (e) => { caseRosterState.q = e.target.value; clearTimeout(draw._t); draw._t = setTimeout(draw, 250); };
+    // 搜尋框每次輸入都用 draw() 整個重畫表格（含輸入框本身），框本身會被整個換掉、
+    // 焦點跟游標位置也會不見——打字打到一半畫面重畫，游標跑掉就會感覺「打字被中斷」，
+    // 中文注音/拼音輸入法選字選到一半被打斷更明顯（組字過程中如果重畫，整個選字直接
+    // 消失）。修法：(1) 中文組字期間（compositionstart~compositionend）完全不重畫，
+    // 等選字完成才重畫；(2) 重畫完後自動把焦點、游標位置還原回搜尋框，讓使用者感覺
+    // 畫面有換但打字沒有被打斷。
+    const rfQ = $('#rfQ');
+    let qComposing = false;
+    const scheduleDraw = () => {
+      clearTimeout(draw._t);
+      draw._t = setTimeout(() => {
+        const cursor = rfQ.selectionStart;
+        draw();
+        const el = $('#rfQ');
+        if (el) { el.focus(); el.setSelectionRange(cursor, cursor); }
+      }, 250);
+    };
+    rfQ.addEventListener('compositionstart', () => { qComposing = true; });
+    rfQ.addEventListener('compositionend', () => { qComposing = false; caseRosterState.q = rfQ.value; scheduleDraw(); });
+    rfQ.oninput = (e) => {
+      caseRosterState.q = e.target.value;
+      if (qComposing) return; // 組字過程中先不重畫，等 compositionend 再重畫
+      scheduleDraw();
+    };
     $$('[data-crow]').forEach((tr) => (tr.onclick = (e) => {
       if (e.target.closest('[data-ftoggle], [data-freview]')) return;
       const c = casesByNid[tr.dataset.crow] || roster.find((x) => String(x.id) === tr.dataset.cid);
