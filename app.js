@@ -1912,13 +1912,18 @@ function archiveBoxCellHtml(c) {
 }
 
 function openArchiveBoxEditor(c, afterSave) {
+  // 這裡故意不用 <input type="number">：Chromium 的 number 輸入框在 Windows 中文輸入法
+  // （尤其新注音）開啟的狀態下，瀏覽器原生的數字輸入攔截邏輯會把 Backspace 鍵吃掉、只剩
+  // Delete 鍵能刪字，是已知相容性問題。改用 type="text" + inputmode="numeric" 並用 input
+  // 事件把非數字字元過濾掉，繞開 number 輸入框的原生鍵盤處理，Backspace/Delete 都能正常用。
   modal(`<h2>登記結案箱年度</h2>
     <p class="small muted" style="margin:4px 0 10px">${esc(c.name)}（案號 ${esc(c.case_no)}）</p>
-    <label class="f">結案箱年度（民國年，例如 115）<input type="number" id="archiveYear" min="100" max="200" value="${c.archive_box_year || ''}"></label>
+    <label class="f">結案箱年度（民國年，例如 115）<input type="text" inputmode="numeric" pattern="[0-9]*" maxlength="3" id="archiveYear" value="${c.archive_box_year || ''}"></label>
     <p class="err-text" id="archiveErr" hidden></p>
     <div class="acts"><button type="button" class="btn" data-no>取消</button><button type="button" class="btn primary" data-yes>儲存</button></div>`,
   (m, close) => {
     $('[data-no]', m).onclick = close;
+    $('#archiveYear', m).addEventListener('input', (e) => { e.target.value = e.target.value.replace(/[^0-9]/g, ''); });
     $('[data-yes]', m).onclick = async () => {
       const raw = $('#archiveYear', m).value;
       const er = $('#archiveErr', m);
