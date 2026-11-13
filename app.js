@@ -368,7 +368,29 @@ async function viewList() {
     $('#fyear').onchange = (e) => { listState.year = e.target.value; if (listState.year === '全部') listState.month = '全部'; listShow = 100; draw(); };
     $('#fmonth').onchange = (e) => { listState.month = e.target.value; listShow = 100; draw(); };
     $('#fmine').onchange = (e) => { listState.mine = e.target.checked; listShow = 100; draw(); };
-    $('#fq').oninput = (e) => { listState.q = e.target.value; listShow = 100; clearTimeout(draw._t); draw._t = setTimeout(() => { draw(); const i = $('#fq'); i.focus(); i.setSelectionRange(i.value.length, i.value.length); }, 250); };
+    // 跟「個案清單」搜尋框同樣的問題：每次輸入都整個重畫表格（含搜尋框本身），框本身
+    // 被換掉會讓焦點、游標位置跟著消失，打字打到一半畫面重畫就會感覺「被中斷」，中文
+    // 注音/拼音輸入法選字選到一半被打斷更明顯。修法同個案清單：(1) 中文組字期間
+    // （compositionstart~compositionend）完全不重畫，等選字完成才重畫；(2) 重畫完後
+    // 自動把焦點、游標位置還原回搜尋框。
+    const fq = $('#fq');
+    let fqComposing = false;
+    const scheduleFqDraw = () => {
+      clearTimeout(draw._t);
+      draw._t = setTimeout(() => {
+        const cursor = fq.selectionStart;
+        draw();
+        const i = $('#fq');
+        if (i) { i.focus(); i.setSelectionRange(cursor, cursor); }
+      }, 250);
+    };
+    fq.addEventListener('compositionstart', () => { fqComposing = true; });
+    fq.addEventListener('compositionend', () => { fqComposing = false; listState.q = fq.value; listShow = 100; scheduleFqDraw(); });
+    fq.oninput = (e) => {
+      listState.q = e.target.value; listShow = 100;
+      if (fqComposing) return; // 組字過程中先不重畫，等 compositionend 再重畫
+      scheduleFqDraw();
+    };
     $('#more')?.addEventListener('click', () => { listShow += 100; draw(); });
     $('#th-date').onclick = () => { listState.dateSort = listState.dateSort === 'asc' ? 'desc' : 'asc'; listShow = 100; draw(); };
     $$('tr.click').forEach((tr) => (tr.onclick = (e) => { if (e.target.closest('a')) return; location.hash = `#/i/${tr.dataset.id}`; }));
