@@ -1949,25 +1949,36 @@ function openArchiveBoxEditor(c, afterSave) {
 // 「未繳天數」只在案本未繳交時才算，用結案日（已結案）或開始服務日（服務中/暫停）
 // 當起算點，天數越大代表這份案本積欠越久，方便管理者依此欄位排序找出最嚴重的案子。
 function exportFileReviewStatus(shown) {
-  const today = new Date();
-  const daysSince = (iso) => { if (!iso) return ''; const d = new Date(iso + 'T00:00:00'); const diff = Math.floor((today - d) / 86400000); return diff >= 0 ? diff : ''; };
-  const header = ['案號', '姓名', '督導員', 'A單位', '狀態', '開始服務日', '結案日', '案本是否已繳交', '案本最後更新時間', '案本最後更新人', '審至（年/月）', '審至是否落後', '未繳天數', '結案箱年度'];
-  const rows = shown.map(({ c, r }) => {
-    const reviewBehind = !!(r && r.lastHomeMonth && (!c.file_reviewed_through || c.file_reviewed_through < r.lastHomeMonth));
-    const refDate = c.status === '結案' ? c.end_date : c.service_start_date;
-    return [
-      c.case_no, c.name, c.lead_supervisor, unitLabel(c.unit_name), c.status,
-      fmtDate(c.service_start_date), fmtDate(c.end_date),
-      c.file_status ? '已繳交' : '未繳交',
-      c.file_updated_at ? fmtTime(c.file_updated_at) : '',
-      c.file_updated_by_name || '',
-      c.file_reviewed_through ? fmtMonth(c.file_reviewed_through) : '',
-      reviewBehind ? '是' : '否',
-      c.file_status ? '' : daysSince(refDate),
-      c.archive_box_year ? `${c.archive_box_year}年` : '',
-    ];
-  });
-  download(`個案清單_案本審查狀況_${today.getFullYear() - 1911}年${String(today.getMonth() + 1).padStart(2, '0')}${String(today.getDate()).padStart(2, '0')}.csv`, [header, ...rows]);
+  // download() 只是靜默建立一個隱藏連結並自動點擊觸發瀏覽器下載，本身完全沒有任何畫面
+  // 回饋（沒有 toast、畫面也不會變化）——檔案其實已經正常下載到「下載」資料夾，但使用者
+  // 沒看到任何反應，很容易誤以為「按了沒反應」。這裡額外包一層 try/catch + toast，
+  // 成功會明確提示「已匯出 N 筆」，萬一真的有例外（例如清單是空的、瀏覽器擋下載）也會
+  // 跳出錯誤訊息，而不是整個無聲失敗。
+  try {
+    if (!shown.length) { toast('目前篩選條件下沒有可匯出的個案，請調整篩選條件'); return; }
+    const today = new Date();
+    const daysSince = (iso) => { if (!iso) return ''; const d = new Date(iso + 'T00:00:00'); const diff = Math.floor((today - d) / 86400000); return diff >= 0 ? diff : ''; };
+    const header = ['案號', '姓名', '督導員', 'A單位', '狀態', '開始服務日', '結案日', '案本是否已繳交', '案本最後更新時間', '案本最後更新人', '審至（年/月）', '審至是否落後', '未繳天數', '結案箱年度'];
+    const rows = shown.map(({ c, r }) => {
+      const reviewBehind = !!(r && r.lastHomeMonth && (!c.file_reviewed_through || c.file_reviewed_through < r.lastHomeMonth));
+      const refDate = c.status === '結案' ? c.end_date : c.service_start_date;
+      return [
+        c.case_no, c.name, c.lead_supervisor, unitLabel(c.unit_name), c.status,
+        fmtDate(c.service_start_date), fmtDate(c.end_date),
+        c.file_status ? '已繳交' : '未繳交',
+        c.file_updated_at ? fmtTime(c.file_updated_at) : '',
+        c.file_updated_by_name || '',
+        c.file_reviewed_through ? fmtMonth(c.file_reviewed_through) : '',
+        reviewBehind ? '是' : '否',
+        c.file_status ? '' : daysSince(refDate),
+        c.archive_box_year ? `${c.archive_box_year}年` : '',
+      ];
+    });
+    download(`個案清單_案本審查狀況_${today.getFullYear() - 1911}年${String(today.getMonth() + 1).padStart(2, '0')}${String(today.getDate()).padStart(2, '0')}.csv`, [header, ...rows]);
+    toast(`已匯出 ${rows.length} 筆，請到瀏覽器「下載」資料夾查看`);
+  } catch (e) {
+    toast('匯出失敗：' + e.message, true);
+  }
 }
 
 function openCaseDetailModal(c, r) {
