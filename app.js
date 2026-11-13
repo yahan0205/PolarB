@@ -1782,7 +1782,7 @@ function drawCaseRosterTable(box, data) {
       draw();
     };
     $('#rfColumns').onclick = () => openRosterColumnPicker(visibleCols, () => draw());
-    $('#rfExportFile').onclick = () => exportFileReviewStatus(shown);
+    $('#rfExportFile').onclick = () => exportFileReviewStatus(shown, unitLabel);
     $('#th-caseno')?.addEventListener('click', () => toggleSort('case_no'));
     $('#th-startdate')?.addEventListener('click', () => toggleSort('service_start_date'));
     $('#statsToggle')?.addEventListener('click', () => { caseRosterState.statsCollapsed = !caseRosterState.statsCollapsed; draw(); });
@@ -1948,7 +1948,7 @@ function openArchiveBoxEditor(c, afterSave) {
 // 讓管理者可以先用上面的篩選條件縮小範圍，再匯出，匯出後在 Excel 裡還能自由排序。
 // 「未繳天數」只在案本未繳交時才算，用結案日（已結案）或開始服務日（服務中/暫停）
 // 當起算點，天數越大代表這份案本積欠越久，方便管理者依此欄位排序找出最嚴重的案子。
-function exportFileReviewStatus(shown) {
+function exportFileReviewStatus(shown, unitLabel) {
   // download() 只是靜默建立一個隱藏連結並自動點擊觸發瀏覽器下載，本身完全沒有任何畫面
   // 回饋（沒有 toast、畫面也不會變化）——檔案其實已經正常下載到「下載」資料夾，但使用者
   // 沒看到任何反應，很容易誤以為「按了沒反應」。這裡額外包一層 try/catch + toast，
