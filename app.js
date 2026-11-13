@@ -656,8 +656,11 @@ function matchItem(m) {
 function drawMatchForm(inq, m) {
   const box = $('#mform-box');
   const cur = m || { contact_date: todayISO(), result: '拒絕', within_7km: true, reject_reason_ids: [] };
-  const cgs = L.cg.filter((c) => (c.active && (!c.region || c.region === inq.region)) || c.id === cur.caregiver_id);
-  const others = L.cg.filter((c) => c.active && c.region && c.region !== inq.region && c.id !== cur.caregiver_id);
+  // 下拉選單裡「本區」「其他區」兩組，組內都改成依員編遞增排序（原本是依姓名排序），
+  // 方便知道員編的人直接用員編順序找人；沒有員編的排在最後面。
+  const byCode = (a, b) => { if (!a.code && !b.code) return 0; if (!a.code) return 1; if (!b.code) return -1; return a.code < b.code ? -1 : a.code > b.code ? 1 : 0; };
+  const cgs = L.cg.filter((c) => (c.active && (!c.region || c.region === inq.region)) || c.id === cur.caregiver_id).sort(byCode);
+  const others = L.cg.filter((c) => c.active && c.region && c.region !== inq.region && c.id !== cur.caregiver_id).sort(byCode);
   box.innerHTML = `<form class="stack" id="mf" novalidate>
     <h2>${m ? `編輯媒合紀錄：${esc(m.caregiver_name)}` : '新增媒合紀錄'}</h2>
     <div class="grid2">
