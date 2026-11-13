@@ -665,8 +665,8 @@ function drawMatchForm(inq, m) {
     <h2>${m ? `編輯媒合紀錄：${esc(m.caregiver_name)}` : '新增媒合紀錄'}</h2>
     <div class="grid2">
       <label class="f">居服員 <span class="req">*</span><select name="caregiver_id">${opt('', '請選擇', cur.caregiver_id)}
-        <optgroup label="${esc(inq.region)}">${cgs.map((c) => opt(c.id, c.name + (c.code ? ` ${c.code}` : ''), cur.caregiver_id)).join('')}</optgroup>
-        ${others.length ? `<optgroup label="其他區">${others.map((c) => opt(c.id, `${c.name}（${c.region}）`, cur.caregiver_id)).join('')}</optgroup>` : ''}</select></label>
+        <optgroup label="${esc(inq.region)}">${cgs.map((c) => opt(c.id, (c.code ? `${c.code} ` : '') + c.name, cur.caregiver_id)).join('')}</optgroup>
+        ${others.length ? `<optgroup label="其他區">${others.map((c) => opt(c.id, (c.code ? `${c.code} ` : '') + c.name, cur.caregiver_id)).join('')}</optgroup>` : ''}</select></label>
       <label class="f">聯絡日期 <span class="req">*</span><input type="date" name="contact_date" value="${esc(cur.contact_date)}"></label>
     </div>
     <div style="display:flex;flex-wrap:wrap;gap:12px 32px">
