@@ -1032,9 +1032,29 @@ function computeComparison(inquiries, rkRows) {
 
   const linkedCaseNos = new Set(linked.map((i) => i.case_no));
   const suggestedCaseNos = new Set(suggested.map((s) => s.rk.case_no));
+  // 「疑似漏填」的用意是抓「忘記建立問案」的個案。但上面比對 suggested/linked 時只看
+  // status==='成案' 的問案（candidates），如果某個個案在問案系統裡其實已經有建立問案、
+  // 只是還在「問案中」還沒標成成案（例如已經有居服員接受、等正式轉案），就會被漏掉、
+  // 誤判成「忘記建立問案」——明明問案確實存在，只是流程還沒走完。這裡額外用「不限狀態」
+  // 的全部問案再比對一次姓名＋地址，只要有任何問案（不管問案中/成案/未成案）相符，就不
+  // 算漏填，避免這種假警報。
+  const anyInquiryMatchCaseNos = new Set();
   for (const rk of rkRows) {
     if (!['服務中', '暫停'].includes(rk.status)) continue;
     if (linkedCaseNos.has(rk.case_no) || suggestedCaseNos.has(rk.case_no)) continue;
+    const nAddr = normAddr(`${rk.city || ''}${rk.district || ''}${rk.address || ''}`);
+    const nName = normName(rk.name);
+    const hasAnyMatch = inquiries.some((inq) => {
+      const nameScore = diceScore(nName, normName(inq.client_name));
+      if (nameScore < 0.5) return false;
+      const addrScore = diceScore(nAddr, normAddr(inq.address));
+      return (nameScore * 0.6 + addrScore * 0.4) >= 0.55;
+    });
+    if (hasAnyMatch) anyInquiryMatchCaseNos.add(rk.case_no);
+  }
+  for (const rk of rkRows) {
+    if (!['服務中', '暫停'].includes(rk.status)) continue;
+    if (linkedCaseNos.has(rk.case_no) || suggestedCaseNos.has(rk.case_no) || anyInquiryMatchCaseNos.has(rk.case_no)) continue;
     missing.push(rk);
   }
   return { confirmed, suggested, missing, needsReview };
@@ -1293,7 +1313,7 @@ async function drawCcReport(box) {
 
   <div class="card" style="margin-bottom:16px">
     <h2>疑似漏填（${cmp.missing.length}）</h2>
-    <p class="small muted" style="margin:4px 0 10px">仁寶系統裡「服務中」或「暫停」的個案，在博樂系統找不到對應的成案問案，可能有人忘記建立問案。</p>
+    <p class="small muted" style="margin:4px 0 10px">仁寶系統裡「服務中」或「暫停」的個案，在博樂系統完全找不到任何姓名/地址相符的問案紀錄（不管問案中、成案、未成案），可能有人忘記建立問案。若問案紀錄已存在、只是還沒標成成案，不會列在這裡。</p>
     ${cmp.missing.length ? `<div class="tbox"><table class="t"><thead><tr><th>案號</th><th>姓名</th><th>狀態</th><th>主責督導</th><th>主責居服員</th><th>地址</th><th>服務起始</th></tr></thead>
       <tbody>${cmp.missing.map((r) => `<tr><td>${esc(r.case_no)}</td><td>${esc(r.name)}</td><td>${esc(r.status)}</td><td>${esc(r.lead_supervisor)}</td><td>${esc(r.lead_caregiver)}</td><td>${esc((r.city || '') + (r.district || '') + (r.address || ''))}</td><td>${fmtDate(r.service_start_date)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted small">沒有發現漏填的個案。</p>'}
   </div>
