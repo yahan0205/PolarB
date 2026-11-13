@@ -1474,10 +1474,13 @@ function drawVisitStats(box, audit) {
     for (const m of r.months) {
       allMonthsSet.add(m);
       const st = r.monthStatus[m];
-      const cell = a.byMonth.get(m) || { home: 0, phone: 0 };
-      if (st.電訪 === '缺漏') { a.phoneMissing++; cell.phone++; }
-      if (st.家訪 === '缺漏(未收案家訪)') { a.homeMissing++; cell.home++; }
-      else if (st.家訪 === '逾期') { a.homeOverdue++; cell.home++; }
+      const cell = a.byMonth.get(m) || { home: 0, phone: 0, homeItems: [], phoneItems: [] };
+      // homeItems/phoneItems：記住這一格是哪些個案造成的，點數字可以列出名單，不用再去
+      // 「缺漏清單」頁籤自己找哪個督導哪個月份。家訪缺漏跟逾期都算進「家訪」這一欄（跟
+      // 上面小計表的邏輯一致），但個別項目的 type 還是分開記，名單裡看得出是哪一種。
+      if (st.電訪 === '缺漏') { a.phoneMissing++; cell.phone++; cell.phoneItems.push({ nid: r.nationalId, name: r.name, caseNo: r.caseNo, type: '電訪缺漏' }); }
+      if (st.家訪 === '缺漏(未收案家訪)') { a.homeMissing++; cell.home++; cell.homeItems.push({ nid: r.nationalId, name: r.name, caseNo: r.caseNo, type: '家訪缺漏' }); }
+      else if (st.家訪 === '逾期') { a.homeOverdue++; cell.home++; cell.homeItems.push({ nid: r.nationalId, name: r.name, caseNo: r.caseNo, type: '家訪逾期' }); }
       if (cell.home || cell.phone) a.byMonth.set(m, cell);
     }
   }
@@ -1488,7 +1491,7 @@ function drawVisitStats(box, audit) {
   box.innerHTML = `
   <div class="tbox" style="margin-bottom:16px"><table class="t"><thead><tr><th>主責督導</th><th class="num">列管個案數</th><th class="num">電訪缺漏筆數</th><th class="num">家訪缺漏筆數</th><th class="num">家訪逾期筆數</th><th class="num">個案清單未列名</th></tr></thead>
     <tbody>${owners.map((o) => { const a = agg.get(o); return `<tr><td>${esc(o)}</td><td class="num">${a.cases}</td><td class="num">${a.phoneMissing}</td><td class="num">${a.homeMissing}</td><td class="num">${a.homeOverdue}</td><td class="num">${a.unlisted}</td></tr>`; }).join('') || '<tr><td colspan="6" class="empty">無資料</td></tr>'}</tbody></table></div>
-  <div class="small muted" style="margin-bottom:8px">各督導每月缺漏情形（家訪缺漏／逾期、電訪缺漏分開呈現），方便每月初核對上個月狀況</div>
+  <div class="small muted" style="margin-bottom:8px">各督導每月缺漏情形（家訪缺漏／逾期、電訪缺漏分開呈現），方便每月初核對上個月狀況；點數字可以看名單</div>
   <div class="tbox"><table class="t"><thead>
     <tr><th rowspan="2" style="vertical-align:bottom">督導</th>${allMonths.map((m) => `<th colspan="2" class="num">${fmtMonth(m)}</th>`).join('')}</tr>
     <tr>${allMonths.map(() => '<th class="num">家訪</th><th class="num">電訪</th>').join('')}</tr>
@@ -1498,9 +1501,27 @@ function drawVisitStats(box, audit) {
       return `<tr><td class="nowrap">${esc(o)}</td>${allMonths.map((m) => {
         const cell = a.byMonth.get(m);
         const home = cell?.home || 0, phone = cell?.phone || 0;
-        return `<td class="num"${home ? ' style="color:var(--bad);font-weight:600"' : ''}>${home}</td><td class="num"${phone ? ' style="color:var(--bad);font-weight:600"' : ''}>${phone}</td>`;
+        const homeCell = home ? `<button type="button" class="link" data-vsowner="${esc(o)}" data-vsmonth="${m}" data-vskind="home" style="color:var(--bad);font-weight:600">${home}</button>` : '0';
+        const phoneCell = phone ? `<button type="button" class="link" data-vsowner="${esc(o)}" data-vsmonth="${m}" data-vskind="phone" style="color:var(--bad);font-weight:600">${phone}</button>` : '0';
+        return `<td class="num">${homeCell}</td><td class="num">${phoneCell}</td>`;
       }).join('')}</tr>`;
     }).join('') || `<tr><td colspan="${allMonths.length * 2 + 1}" class="empty">無資料</td></tr>`}</tbody></table></div>`;
+  $$('[data-vsowner]').forEach((btn) => (btn.onclick = async () => {
+    const { vsowner, vsmonth, vskind } = btn.dataset;
+    const cell = agg.get(vsowner)?.byMonth.get(vsmonth);
+    const items = (vskind === 'home' ? cell?.homeItems : cell?.phoneItems) || [];
+    let notes = [];
+    try { notes = await db.all('rk_visit_notes', {}); } catch (e) { /* 名單本身還是看得到，原因說明載入失敗就先留空 */ }
+    const noteMap = new Map(notes.map((n) => [`${n.national_id}|${n.month}|${n.deficiency_type}`, n]));
+    modal(`<h2>${esc(vsowner)}　${fmtMonth(vsmonth)}　${vskind === 'home' ? '家訪缺漏／逾期' : '電訪缺漏'}名單（${items.length}）</h2>
+      <div class="tbox" style="margin-top:10px"><table class="t"><thead><tr><th>姓名</th><th>案號</th><th>類型</th><th>原因說明</th></tr></thead>
+      <tbody>${items.map((it) => {
+        const n = noteMap.get(`${it.nid}|${vsmonth}|${it.type}`);
+        return `<tr><td class="nowrap">${esc(it.name)}</td><td class="nowrap">${esc(it.caseNo || '')}</td><td><span class="st ${it.type === '家訪逾期' ? 'r-拒絕' : 's-問案中'}">${esc(it.type)}</span></td><td>${esc(n?.note || '')}</td></tr>`;
+      }).join('') || '<tr><td colspan="4" class="empty">無資料</td></tr>'}</tbody></table></div>
+      <div class="acts"><button type="button" class="btn" data-no>關閉</button></div>`,
+    (m, close) => { $('[data-no]', m).onclick = close; });
+  }));
 }
 
 function drawVisitImport(box) {
