@@ -177,6 +177,7 @@ const db = {
 let me = null;            // 登入者在 staff 表的資料
 let L = null;             // 下拉選項
 const isDirector = () => me && (me.role === 'director' || me.role === 'admin');
+const isAdmin = () => me && me.role === 'admin';
 
 async function loadMe() {
   const rows = await db.get('staff', { user_id: `eq.${session.user.id}`, active: 'eq.true', select: '*' });
@@ -2167,14 +2168,20 @@ async function viewAdmin(tab) {
     : tab === 'sc' ? `<td><input type="text" name="code" value="${esc(r.code || '')}" aria-label="代碼"></td><td><input type="text" name="name" value="${esc(r.name)}" aria-label="名稱"></td><td><input type="number" name="sort" value="${r.sort}" aria-label="排序"></td>`
       : tab === 'cg' ? `<td><input type="text" name="code" value="${esc(r.code || '')}" aria-label="員編"></td><td><input type="text" name="name" value="${esc(r.name)}" aria-label="姓名"></td><td>${regionSel('region', r.region)}</td>`
         : `<td><input type="text" name="code" value="${esc(r.code || '')}" aria-label="員編"></td><td><input type="text" name="name" value="${esc(r.name)}" aria-label="姓名"></td><td>${regionSel('region', r.region)}</td><td>${roleSel(r.role)}</td><td class="small">${r.user_id ? '已連結' : '<span class="faint">未連結</span>'}</td>`;
+  // 居服員／督導帳號允許管理者（僅限 admin，不含主任）直接刪除——跟其他選項類表格
+  // （轉介單位、未成案原因…）不一樣，那些刻意只能停用不能刪除，是因為舊紀錄會引用到。
+  // 但居服員／督導如果是打錯名字（不是真的離職），留著停用只會一直卡在清單裡，應該要
+  // 能真的刪掉。如果這個人其實已經被媒合紀錄/問案等資料引用，資料庫會因為外鍵限制擋下
+  // 刪除、跳出錯誤訊息，不會真的刪出資料不一致。
+  const canDelete = isAdmin() && (tab === 'cg' || tab === 'staff');
   $('#main').innerHTML = `
-  <div class="head"><div><h1>管理</h1><div class="muted small" style="margin-top:4px">選項不刪除，不用的改成停用；停用後不會出現在下拉選單，但舊紀錄仍保留。</div></div></div>
+  <div class="head"><div><h1>管理</h1><div class="muted small" style="margin-top:4px">選項不刪除，不用的改成停用；停用後不會出現在下拉選單，但舊紀錄仍保留。${canDelete ? '居服員／督導如果是輸入錯誤（非離職），管理者可以直接刪除。' : ''}</div></div></div>
   <nav class="tabs" aria-label="管理項目">${Object.entries(ADMIN_TABS).map(([k, v]) => `<a href="#/admin/${k}" class="${k === tab ? 'on' : ''}">${v.label}</a>`).join('')}</nav>
   ${tab === 'staff' ? '<div class="card small" style="margin-bottom:16px;color:var(--ink2)">新增登入帳號要在 Supabase 後台建立，再把帳號連到這裡的姓名，步驟見設定說明。主任與管理者可以判定拒案、刪除紀錄、管理選項。</div>' : ''}
   <div class="tbox"><table class="t" style="min-width:640px">
-    <thead><tr>${head}<th style="width:80px">啟用</th><th style="width:90px"></th></tr></thead>
-    <tbody>${rows.map((r) => `<tr data-id="${r.id}">${cells(r)}<td><input type="checkbox" name="active" ${r.active ? 'checked' : ''} aria-label="啟用" style="width:20px;height:20px;accent-color:var(--accent)"></td><td><button type="button" class="btn small" data-save>儲存</button></td></tr>`).join('')}
-      <tr data-new>${cells({ name: '', sort: (rows.length ? Math.max(...rows.map((r) => r.sort || 0)) + 1 : 1), role: 'supervisor', region: tab === 'cg' || tab === 'staff' ? (me.region || '') : '' })}<td><input type="checkbox" name="active" checked aria-label="啟用" style="width:20px;height:20px;accent-color:var(--accent)"></td><td><button type="button" class="btn small primary" data-add>新增</button></td></tr>
+    <thead><tr>${head}<th style="width:80px">啟用</th><th style="width:90px"></th>${canDelete ? '<th style="width:70px"></th>' : ''}</tr></thead>
+    <tbody>${rows.map((r) => `<tr data-id="${r.id}">${cells(r)}<td><input type="checkbox" name="active" ${r.active ? 'checked' : ''} aria-label="啟用" style="width:20px;height:20px;accent-color:var(--accent)"></td><td><button type="button" class="btn small" data-save>儲存</button></td>${canDelete ? `<td><button type="button" class="link" style="color:var(--bad)" data-del="${r.id}">刪除</button></td>` : ''}</tr>`).join('')}
+      <tr data-new>${cells({ name: '', sort: (rows.length ? Math.max(...rows.map((r) => r.sort || 0)) + 1 : 1), role: 'supervisor', region: tab === 'cg' || tab === 'staff' ? (me.region || '') : '' })}<td><input type="checkbox" name="active" checked aria-label="啟用" style="width:20px;height:20px;accent-color:var(--accent)"></td><td><button type="button" class="btn small primary" data-add>新增</button></td>${canDelete ? '<td></td>' : ''}</tr>
     </tbody></table></div>
   <div id="ua-extra"></div>`;
   const read = (tr) => {
@@ -2195,6 +2202,14 @@ async function viewAdmin(tab) {
     if (!b.name) { toast('請輸入名稱', true); return; }
     try { await db.insert(T.table, b); await loadLookups(); toast('已新增'); render(); } catch (e) { toast(/duplicate|unique/.test(e.message) ? '這個名稱已經存在' : e.message, true); }
   };
+  if (canDelete) $$('[data-del]').forEach((btn) => (btn.onclick = async () => {
+    const tr = btn.closest('tr');
+    const name = $('[name=name]', tr).value.trim();
+    const ok = await confirmBox(`確定要刪除「${name}」嗎？這個動作無法復原。如果這個人已經有媒合紀錄或問案等資料引用，系統會拒絕刪除。`, '刪除', true);
+    if (!ok) return;
+    try { await db.remove(T.table, Number(btn.dataset.del)); await loadLookups(); toast('已刪除'); render(); }
+    catch (e) { toast(/foreign key|violates/.test(e.message) ? '這個人已經有媒合紀錄或問案等資料引用，無法刪除，請改成停用' : e.message, true); }
+  }));
   if (tab === 'units') await drawUnitAbbrSection($('#ua-extra'));
 }
 
