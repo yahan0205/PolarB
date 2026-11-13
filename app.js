@@ -1613,6 +1613,7 @@ const ROSTER_COLUMNS = [
   { key: 'next_due', label: '下次應家訪日', width: '100px' },
   { key: 'phone_visit', label: '最近一次電訪', width: '120px' },
   { key: 'file_status', label: '案本', width: '90px' },
+  { key: 'archive_box', label: '結案箱年度', width: '100px' },
 ];
 const rosterColumnsKey = () => `bole.rosterColumns.${me?.id || 'anon'}`;
 function loadRosterColumns() {
@@ -1730,6 +1731,7 @@ function drawCaseRosterTable(box, data) {
       <label class="inline-check"><input type="checkbox" id="rfIssue" ${caseRosterState.onlyIssues ? 'checked' : ''}>只顯示有缺漏/逾期</label>
       <input type="search" class="grow" id="rfQ" placeholder="搜尋案號、姓名、身分證字號、督導員（含已離職）" value="${esc(caseRosterState.q)}">
       <button type="button" class="btn small" id="rfColumns">⚙ 欄位</button>
+      <button type="button" class="btn small" id="rfExportFile">⬇ 匯出案本審查狀況</button>
     </div>
     <div class="muted small" style="margin-bottom:8px">共 ${shown.length} 筆${roster.length ? '' : '（個案清單還沒有資料，請管理者到下方「重新整理個案清單」匯入）'}</div>
     <div class="tbox"><table class="t roster">
@@ -1769,6 +1771,7 @@ function drawCaseRosterTable(box, data) {
           next_due: `<td class="nowrap small">${nextDueCell}</td>`,
           phone_visit: `<td class="nowrap">${phoneCell}</td>`,
           file_status: `<td class="nowrap">${fileCell}</td>`,
+          archive_box: `<td class="nowrap">${archiveBoxCellHtml(c)}</td>`,
         };
         return `<tr class="click" data-crow="${esc(c.national_id || '')}" data-cid="${c.id}">${ROSTER_COLUMNS.filter((col) => colVisible(col.key)).map((col) => cellByKey[col.key]).join('')}</tr>`;
       }).join('') || `<tr><td colspan="${ROSTER_COLUMNS.filter((col) => colVisible(col.key)).length}" class="empty">沒有符合條件的個案</td></tr>`}</tbody></table></div>
@@ -1779,6 +1782,7 @@ function drawCaseRosterTable(box, data) {
       draw();
     };
     $('#rfColumns').onclick = () => openRosterColumnPicker(visibleCols, () => draw());
+    $('#rfExportFile').onclick = () => exportFileReviewStatus(shown);
     $('#th-caseno')?.addEventListener('click', () => toggleSort('case_no'));
     $('#th-startdate')?.addEventListener('click', () => toggleSort('service_start_date'));
     $('#statsToggle')?.addEventListener('click', () => { caseRosterState.statsCollapsed = !caseRosterState.statsCollapsed; draw(); });
@@ -1811,7 +1815,7 @@ function drawCaseRosterTable(box, data) {
       scheduleDraw();
     };
     $$('[data-crow]').forEach((tr) => (tr.onclick = (e) => {
-      if (e.target.closest('[data-ftoggle], [data-freview]')) return;
+      if (e.target.closest('[data-ftoggle], [data-freview], [data-fbox]')) return;
       const c = casesByNid[tr.dataset.crow] || roster.find((x) => String(x.id) === tr.dataset.cid);
       openCaseDetailModal(c, c?.national_id ? audit.results.get(c.national_id) : null);
     }));
@@ -1825,6 +1829,11 @@ function drawCaseRosterTable(box, data) {
       e.stopPropagation();
       const c = roster.find((x) => String(x.id) === b.dataset.freview);
       if (c) openFileReviewEditor(c);
+    }));
+    $$('[data-fbox]').forEach((b) => (b.onclick = (e) => {
+      e.stopPropagation();
+      const c = roster.find((x) => String(x.id) === b.dataset.fbox);
+      if (c) openArchiveBoxEditor(c);
     }));
     if (isDirector() && $('#cr-import')) drawCaseRosterImport($('#cr-import'), roster);
   };
@@ -1889,6 +1898,73 @@ function openFileReviewEditor(c, afterSave) {
   });
 }
 
+// 結案箱年度：個案結案後，紙本案本最後會歸檔到某一年度的結案箱（例如 115年），這個
+// 欄位讓管理者登記歸檔到哪一箱，方便收到結案箱的同仁跟系統勾稽核對。只有「結案」的
+// 案子還沒登記時才用紅字提醒（服務中/暫停的案子本來就還不會進結案箱，不用提醒）。
+function archiveBoxCellHtml(c) {
+  const title = c.archive_box_by_name ? `最後更新：${esc(c.archive_box_by_name)} ${fmtTime(c.archive_box_at)}` : '尚未設定';
+  const needsArchive = c.status === '結案' && !c.archive_box_year;
+  const text = c.archive_box_year ? `${c.archive_box_year}年結案箱` : (c.status === '結案' ? '未登記結案箱' : '—');
+  const style = needsArchive ? 'color:var(--bad);font-weight:600' : 'color:var(--ink2)';
+  return isDirector()
+    ? `<button type="button" class="link" data-fbox="${c.id}" style="${style}" title="${title}">${esc(text)}${needsArchive ? ' ⚠' : ''}</button>`
+    : `<span class="small" style="${needsArchive ? 'color:var(--bad);font-weight:600' : 'color:var(--muted)'}" title="${title}">${esc(text)}${needsArchive ? ' ⚠' : ''}</span>`;
+}
+
+function openArchiveBoxEditor(c, afterSave) {
+  modal(`<h2>登記結案箱年度</h2>
+    <p class="small muted" style="margin:4px 0 10px">${esc(c.name)}（案號 ${esc(c.case_no)}）</p>
+    <label class="f">結案箱年度（民國年，例如 115）<input type="number" id="archiveYear" min="100" max="200" value="${c.archive_box_year || ''}"></label>
+    <p class="err-text" id="archiveErr" hidden></p>
+    <div class="acts"><button type="button" class="btn" data-no>取消</button><button type="button" class="btn primary" data-yes>儲存</button></div>`,
+  (m, close) => {
+    $('[data-no]', m).onclick = close;
+    $('[data-yes]', m).onclick = async () => {
+      const raw = $('#archiveYear', m).value;
+      const er = $('#archiveErr', m);
+      const val = raw ? Number(raw) : null;
+      if (raw && (!Number.isInteger(val) || val < 100 || val > 200)) { er.textContent = '請輸入正確的民國年（例如 115）'; er.hidden = false; return; }
+      try {
+        const now = new Date().toISOString();
+        await db.update('case_roster', c.id, {
+          archive_box_year: val, archive_box_at: now,
+          archive_box_by: session.user.id, archive_box_by_name: me.name,
+        });
+        c.archive_box_year = val; c.archive_box_at = now; c.archive_box_by_name = me.name;
+        toast('已更新結案箱年度'); close();
+        if (afterSave) afterSave(); else viewCases();
+      } catch (e) { er.textContent = e.message; er.hidden = false; }
+    };
+  });
+}
+
+// 匯出案本審查狀況：給管理者掌握「哪些個案案本還沒繳、哪些已經積欠很久」，用 CSV
+// （UTF-8 BOM，Excel 可以直接開且中文不會亂碼）匯出目前畫面上篩選/搜尋後的清單，
+// 讓管理者可以先用上面的篩選條件縮小範圍，再匯出，匯出後在 Excel 裡還能自由排序。
+// 「未繳天數」只在案本未繳交時才算，用結案日（已結案）或開始服務日（服務中/暫停）
+// 當起算點，天數越大代表這份案本積欠越久，方便管理者依此欄位排序找出最嚴重的案子。
+function exportFileReviewStatus(shown) {
+  const today = new Date();
+  const daysSince = (iso) => { if (!iso) return ''; const d = new Date(iso + 'T00:00:00'); const diff = Math.floor((today - d) / 86400000); return diff >= 0 ? diff : ''; };
+  const header = ['案號', '姓名', '督導員', 'A單位', '狀態', '開始服務日', '結案日', '案本是否已繳交', '案本最後更新時間', '案本最後更新人', '審至（年/月）', '審至是否落後', '未繳天數', '結案箱年度'];
+  const rows = shown.map(({ c, r }) => {
+    const reviewBehind = !!(r && r.lastHomeMonth && (!c.file_reviewed_through || c.file_reviewed_through < r.lastHomeMonth));
+    const refDate = c.status === '結案' ? c.end_date : c.service_start_date;
+    return [
+      c.case_no, c.name, c.lead_supervisor, unitLabel(c.unit_name), c.status,
+      fmtDate(c.service_start_date), fmtDate(c.end_date),
+      c.file_status ? '已繳交' : '未繳交',
+      c.file_updated_at ? fmtTime(c.file_updated_at) : '',
+      c.file_updated_by_name || '',
+      c.file_reviewed_through ? fmtMonth(c.file_reviewed_through) : '',
+      reviewBehind ? '是' : '否',
+      c.file_status ? '' : daysSince(refDate),
+      c.archive_box_year ? `${c.archive_box_year}年` : '',
+    ];
+  });
+  download(`個案清單_案本審查狀況_${today.getFullYear() - 1911}年${String(today.getMonth() + 1).padStart(2, '0')}${String(today.getDate()).padStart(2, '0')}.csv`, [header, ...rows]);
+}
+
 function openCaseDetailModal(c, r) {
   if (!c) return;
   // 警示：只要有任一個月家訪逾期/缺漏，或電訪缺漏，就在最上方用明顯的紅色提示條列出來，
@@ -1920,6 +1996,8 @@ function openCaseDetailModal(c, r) {
       ${isDirector() ? '<button type="button" class="link" data-ftoggle2 style="margin-left:8px">切換</button>' : ''}</div>
     <div class="inline-check" style="margin-top:4px">審至：<span id="cdReview" style="${reviewBehind ? 'color:var(--bad);font-weight:600' : ''}">${reviewText}${reviewBehind ? ' ⚠' : ''}</span>${c.file_reviewed_by_name ? `<span class="small muted"> （${esc(c.file_reviewed_by_name)} ${fmtTime(c.file_reviewed_at)}）</span>` : ''}
       ${isDirector() ? '<button type="button" class="link" data-freview2 style="margin-left:8px">編輯</button>' : ''}</div>
+    <div class="inline-check" style="margin-top:4px">結案箱：<span id="cdArchive" style="${(c.status === '結案' && !c.archive_box_year) ? 'color:var(--bad);font-weight:600' : ''}">${c.archive_box_year ? esc(`${c.archive_box_year}年結案箱`) : (c.status === '結案' ? '未登記結案箱 ⚠' : '—')}</span>${c.archive_box_by_name ? `<span class="small muted"> （${esc(c.archive_box_by_name)} ${fmtTime(c.archive_box_at)}）</span>` : ''}
+      ${isDirector() ? '<button type="button" class="link" data-fbox2 style="margin-left:8px">編輯</button>' : ''}</div>
     ${warningHtml}
     ${monthsHtml}
     <div class="acts"><button type="button" class="btn" data-no>關閉</button></div>`,
@@ -1933,6 +2011,8 @@ function openCaseDetailModal(c, r) {
     };
     const rb = $('[data-freview2]', m);
     if (rb) rb.onclick = () => openFileReviewEditor(c, () => { viewCases(); openCaseDetailModal(c, r); });
+    const xb = $('[data-fbox2]', m);
+    if (xb) xb.onclick = () => openArchiveBoxEditor(c, () => { viewCases(); openCaseDetailModal(c, r); });
   });
 }
 
