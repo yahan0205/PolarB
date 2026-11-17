@@ -31,10 +31,10 @@ function toast(msg, isErr = false) {
   clearTimeout(toast._t); toast._t = setTimeout(() => { t.className = ''; }, isErr ? 5000 : 2500);
 }
 
-function modal(html, onMount) {
+function modal(html, onMount, onClose) {
   const root = $('#modal-root');
   root.innerHTML = `<div class="modal-bg"><div class="modal" role="dialog" aria-modal="true">${html}</div></div>`;
-  const close = () => { root.innerHTML = ''; document.removeEventListener('keydown', onKey); };
+  const close = () => { if (!root.firstElementChild) return; root.innerHTML = ''; document.removeEventListener('keydown', onKey); onClose?.(); };
   const onKey = (e) => { if (e.key === 'Escape') close(); };
   document.addEventListener('keydown', onKey);
   $('.modal-bg', root).addEventListener('click', (e) => { if (e.target.classList.contains('modal-bg')) close(); });
@@ -45,11 +45,18 @@ function modal(html, onMount) {
 
 function confirmBox(text, okLabel = '確定', danger = false) {
   return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value, close) => {
+      if (settled) return;
+      settled = true;
+      close?.();
+      resolve(value);
+    };
     modal(`<p style="margin:0">${esc(text)}</p><div class="acts"><button type="button" class="btn" data-no>取消</button><button type="button" class="btn ${danger ? 'danger' : 'primary'}" data-yes>${esc(okLabel)}</button></div>`,
       (m, close) => {
-        $('[data-no]', m).onclick = () => { close(); resolve(false); };
-        $('[data-yes]', m).onclick = () => { close(); resolve(true); };
-      });
+        $('[data-no]', m).onclick = () => finish(false, close);
+        $('[data-yes]', m).onclick = () => finish(true, close);
+      }, () => finish(false));
   });
 }
 
@@ -229,7 +236,7 @@ function drawNav() {
 /* ================= 路由 ================= */
 async function render() {
   const main = $('#main');
-  if (!BASE || BASE.includes('你的專案')) {
+  if (!BASE || BASE.includes('你的專案') || BASE.includes('YOUR-TEST-PROJECT')) {
     $('#topbar').hidden = true;
     main.innerHTML = '<div class="card login"><h1>尚未設定</h1><p>請在 config.js 填入 Supabase 的網址與 anon key。</p></div>';
     return;
@@ -255,6 +262,7 @@ async function render() {
     else if (h === '#/cases') await viewCases();
     else if (h === '#/report') await viewReport();
     else if (h === '#/stats') await viewStats();
+    else if (h === '#/admin/rotation' && isAdmin()) await viewRotationAdmin();
     else if ((m = h.match(/^#\/admin(?:\/(\w+))?$/)) && isDirector()) await viewAdmin(m[1] || 'units');
     else main.innerHTML = '<div class="card empty">找不到這個頁面。<a href="#/">回問案列表</a></div>';
   } catch (e) {
@@ -306,6 +314,121 @@ function changePassword() {
   });
 }
 
+/* ================= 居督輪接（資料庫為唯一正式分配來源） ================= */
+const rotationRpc = (name, args) => rest('POST', `rpc/${name}`, { body: args });
+// 輪接問案的建立、一般欄位修改及改派均以資料庫單一交易完成。
+const rotationSave = (id, payload, overrideId = null, reason = null) =>
+  rotationRpc('rotation_save_inquiry', { p_inquiry_id: id, p_payload: payload, p_override_staff_id: overrideId, p_reason: reason });
+async function rotationState(region) {
+  const cfgs = await db.get('rotation_regions', { region: `eq.${region}`, select: '*' });
+  const cfg = cfgs[0];
+  if (!cfg) return { enabled: false, slots: [], next: null };
+  const slots = await db.get('rotation_slots', { region: `eq.${region}`, generation: `eq.${cfg.generation}`, select: 'id,position,staff_id', order: 'position' });
+  if (!cfg.enabled || !slots.length) return { ...cfg, slots, next: null };
+  const allocs = await db.all('rotation_allocations', { region: `eq.${region}`, generation: `eq.${cfg.generation}`, select: 'id,sequence_number,released_at' });
+  const open = new Set(allocs.filter((a) => !a.released_at).map((a) => Number(a.sequence_number)));
+  const freed = allocs.filter((a) => a.released_at && !open.has(Number(a.sequence_number))).map((a) => Number(a.sequence_number));
+  const sequence = freed.length ? Math.min(...freed) : Number(cfg.next_sequence);
+  return { ...cfg, slots, next: { sequence, staff_id: slots[(sequence - 1) % slots.length].staff_id, isBackfill: !!freed.length } };
+}
+function rotationNames(s) { return (s.slots || []).map((x) => `${x.position}. ${L.staffById[x.staff_id]?.name || '未知人員'}`).join(' → '); }
+async function rotationShow(region) {
+  if (region === '全部') region = me.region || REGIONS[0];
+  try {
+    const s = await rotationState(region);
+    modal(`<h2>${esc(region)}居督輪接順序</h2><p>${s.enabled ? '已啟用' : '未啟用'}</p>
+      <p class="rotation-sequence">${s.slots.length ? esc(rotationNames(s)) : '尚未設定輪接名單'}</p>
+      ${s.enabled && s.next ? `<p class="small muted">目前預覽下一順位：${esc(L.staffById[s.next.staff_id]?.name || '')}${s.next.isBackfill ? '（遞補未成案空缺）' : ''}。正式儲存時以資料庫即時分配結果為準。</p>` : ''}
+      <div class="acts"><button type="button" class="btn" data-close>關閉</button></div>`, (box, close) => { $('[data-close]', box).onclick = close; });
+  } catch(e) { toast(`無法讀取輪接設定：${e.message}`, true); }
+}
+async function rotationChanges(inquiryId) {
+  return db.get('rotation_changes', { inquiry_id: `eq.${inquiryId}`, select: '*', order: 'changed_at.desc,id.desc' });
+}
+function rotationChangeLines(changes) {
+  return changes.map((c) => `<li><span class="small muted">${fmtTime(c.changed_at)}</span> ${esc(L.staffById[c.previous_staff_id]?.name || '—')} → ${esc(L.staffById[c.new_staff_id]?.name || '—')}
+     ${c.amendment_of ? '<span class="small muted">（原因更正）</span>' : ''}｜${esc(c.reason)}
+     ${isAdmin() ? `<button class="btn small" type="button" data-amend="${c.id}">修正原因</button>` : ''}</li>`).join('');
+}
+function rotationAskReason(fromName, toName) {
+  return new Promise((resolve) => {
+    modal(`<h2>更換主責居督</h2><p>由「${esc(fromName)}」更換為「${esc(toName)}」</p>
+      <label class="f">異動原因 <span class="req">*</span><textarea id="rotation-reason" rows="3" placeholder="請說明更換原因"></textarea></label>
+      <p class="err-text" id="rotation-reason-error" hidden></p>
+      <div class="acts"><button type="button" class="btn" data-cancel>取消</button><button type="button" class="btn primary" data-confirm>確認更換</button></div>`, (box, close) => {
+      $('[data-cancel]', box).onclick = () => { close(); resolve(null); };
+      $('[data-confirm]', box).onclick = () => {
+        const reason = $('#rotation-reason',box).value.trim();
+        if (!reason) { $('#rotation-reason-error',box).textContent = '請填寫異動原因'; $('#rotation-reason-error',box).hidden = false; return; }
+        resolve(reason); close();
+      };
+    }, () => resolve(null));
+  });
+}
+async function rotationAmend(id) {
+  if (!isAdmin()) { toast('僅管理者可以修正改派原因', true); return; }
+  const reason = await rotationAskReason('原異動原因', '更正後原因');
+  if (!reason) return;
+  try { await rotationRpc('rotation_amend_reason', { p_change_id: id, p_reason: reason }); toast('原因已更正，原紀錄仍保留'); render(); }
+  catch(e) { toast(e.message,true); }
+}
+async function viewRotationAdmin() {
+  if (!isAdmin()) throw new Error('僅管理者可修改輪接設定');
+  const configs = await Promise.all(REGIONS.map(rotationState));
+  let region = me.region && REGIONS.includes(me.region) ? me.region : REGIONS[0];
+  let choices = [];
+  let enabledChoice=Boolean(configs[REGIONS.indexOf(region)].enabled);
+  const main = $('#main');
+  const draw = () => {
+    const state = configs[REGIONS.indexOf(region)];
+    const eligible = L.staff.filter((x) => x.region === region && x.active && x.role === 'supervisor');
+    main.innerHTML = `<div class="head"><div><h1>管理 · 居督輪接</h1><div class="muted small">僅管理者可修改。每次啟用或儲存新順序都從第 1 順位重新開始，舊資料與異動紀錄保留。</div></div></div>
+      <nav class="tabs"><a href="#/admin/staff">← 返回管理</a></nav>
+      <section class="card stack"><label class="f">區域<select id="rotation-region">${REGIONS.map((x)=>opt(x,x,region)).join('')}</select></label>
+      <p class="small muted">目前狀態：${state.enabled?'啟用':'停用'}；循環版本 ${state.generation}</p>
+      <label class="inline-check"><input type="checkbox" id="rotation-enabled" ${enabledChoice?'checked':''}> 啟用輪接</label>
+      <div id="rotation-edit-list" class="stack">${choices.map((staffId,i)=>`<div class="rotation-edit-row"><span>順位 ${i+1}</span><select data-slot="${i}">${eligible.map((x)=>opt(x.id,x.name,staffId)).join('')}</select>
+       <button class="btn small" data-up="${i}" ${i===0?'disabled':''}>上移</button><button class="btn small" data-down="${i}" ${i===choices.length-1?'disabled':''}>下移</button><button class="btn small" data-remove="${i}">移除</button></div>`).join('')}</div>
+      <div class="acts"><button class="btn" type="button" id="rotation-add" ${!eligible.length?'disabled':''}>＋ 增加順位</button><button class="btn primary" type="button" id="rotation-save">儲存設定</button></div>
+      <p class="small muted">同一居督可重複選擇，例如甲－乙－甲－丙；異動順序會建立新的循環版本。若停用後重新啟用，請確認名單再儲存。</p></section>`;
+    $('#rotation-region').onchange=(e)=>{ region=e.target.value; const next=configs[REGIONS.indexOf(region)];enabledChoice=Boolean(next.enabled); choices=next.slots.map((x)=>x.staff_id); draw(); };
+    $('#rotation-enabled').onchange=(e)=>{enabledChoice=e.target.checked;};
+    $$('[data-slot]').forEach((el)=>el.onchange=()=>{choices[Number(el.dataset.slot)]=Number(el.value);});
+    $$('[data-up]').forEach((el)=>el.onclick=()=>{let i=Number(el.dataset.up); [choices[i-1],choices[i]]=[choices[i],choices[i-1]];draw();});
+    $$('[data-down]').forEach((el)=>el.onclick=()=>{let i=Number(el.dataset.down); [choices[i+1],choices[i]]=[choices[i],choices[i+1]];draw();});
+    $$('[data-remove]').forEach((el)=>el.onclick=()=>{choices.splice(Number(el.dataset.remove),1);draw();});
+    $('#rotation-add').onclick=()=>{ choices.push(eligible[0].id);draw(); };
+    $('#rotation-save').onclick=async()=>{
+      const button=$('#rotation-save');
+      const enabled=enabledChoice;
+      const regionToSave=region;
+      const oldGeneration=Number(configs[REGIONS.indexOf(regionToSave)].generation);
+      const intendedSlots=[...choices].map(Number);
+      if (enabled && intendedSlots.length===0) {toast('啟用時至少需要一個順位',true);return;}
+      if (enabled && intendedSlots.some((id)=>!eligible.some((s)=>s.id===id))) {toast('輪接名單包含非本區在職居督，請重新選擇',true);return;}
+      // 明列所有順位，避免使用者新增列後忘記更改預設人選（例如甲甲甲甲）。
+      const summary=enabled ? intendedSlots.map((id,i)=>`${i+1}. ${L.staffById[id]?.name || '未知居督'}`).join(' → ') : '停用（不再自動分配新問案）';
+      if (!await confirmBox(`確認儲存「${regionToSave}」輪接設定？\n${summary}\n每次儲存會從第 1 順位開啟新的輪接週期，歷史紀錄保留。`))return;
+      button.disabled=true;
+      try {
+        await rotationRpc('rotation_configure',{p_region:regionToSave,p_enabled:enabled,p_staff_ids:enabled?intendedSlots:null});
+        // 不能因 RPC 沒報錯就宣稱儲存完成；必須重新讀取 DB 並比對每一順位。
+        const verified=await rotationState(regionToSave);
+        const actualSlots=verified.slots.map((s)=>Number(s.staff_id));
+        if (Number(verified.generation)<=oldGeneration || Boolean(verified.enabled)!==enabled || (enabled &&
+          (actualSlots.length!==intendedSlots.length || actualSlots.some((id,i)=>id!==intendedSlots[i])))) {
+          throw new Error('資料庫設定與畫面提交內容不一致；請重新整理確認，勿連續重複儲存。');
+        }
+        await viewRotationAdmin();
+        toast(`已確認${regionToSave}輪接設定儲存成功（版本 ${verified.generation}）`);
+      } catch(e) { toast(`輪接設定未確認成功：${e.message}`,true); }
+      finally { if(button.isConnected) button.disabled=false; }
+    };
+  };
+  choices=configs[REGIONS.indexOf(region)].slots.map((x)=>x.staff_id);
+  draw();
+}
+
 /* ================= 問案列表 ================= */
 const listState = store.get('bole.list') || { region: null, status: '全部', year: '全部', month: '全部', q: '', mine: false, dateSort: 'desc' };
 if (!listState.dateSort) listState.dateSort = 'desc';
@@ -314,6 +437,11 @@ let listShow = 100;
 
 async function viewList() {
   if (listState.region === null) listState.region = me.region || '全部';
+  const [rotationConfigs, rotationFlags] = await Promise.all([
+    db.get('rotation_regions', { select:'region,enabled' }),
+    db.all('rotation_changes',{select:'id,inquiry_id'})
+  ]);
+  const changedIds = new Set(rotationFlags.map((x)=>x.inquiry_id));
   const rows = await db.all('inquiries_v', {
     select: 'id,code,region,inquiry_date,unit_name,case_manager,client_name,address,service_detail,condition_names,intake_staff_id,lead_staff_id,intake_name,status,match_total,match_rejected,match_accepted,match_pending',
     order: 'inquiry_date.desc.nullslast,code.desc',
@@ -338,7 +466,7 @@ async function viewList() {
     const sortIcon = listState.dateSort === 'asc' ? '▲' : '▼';
     $('#main').innerHTML = `
     <div class="head"><div><h1>問案</h1><div class="muted small" style="margin-top:4px">共 ${shown.length} 筆</div></div>
-      <div class="right"><a class="btn primary" href="#/new">＋ 新增問案</a></div></div>
+      <div class="right"><button type="button" class="btn" id="rotation-peek" ${rotationConfigs.some((x)=>x.enabled && (listState.region === '全部' || x.region === listState.region))?"":"hidden"}>查看輪接順序</button><a class="btn primary" href="#/new">＋ 新增問案</a></div></div>
     <div class="card filters">
       <div class="seg" role="group" aria-label="區域">${['全部', ...REGIONS].map((r) => `<button type="button" data-region="${r}" class="${listState.region === r ? 'on' : ''}">${r}</button>`).join('')}</div>
       <div class="pills" role="group" aria-label="狀態">${['全部', ...STATUSES].map((s) => `<button type="button" data-status="${s}" class="${listState.status === s ? 'on' : ''}">${s}<span>${count(s)}</span></button>`).join('')}</div>
@@ -351,7 +479,7 @@ async function viewList() {
       <thead><tr><th>編號</th><th id="th-date" style="cursor:pointer;user-select:none" title="點擊排序">問案日期 <span class="small muted">${sortIcon}</span></th><th>區域</th><th>轉介單位</th><th>個案</th><th>服務需求</th><th>特殊條件</th><th>收案督導</th><th>媒合</th><th>狀態</th></tr></thead>
       <tbody>${shown.slice(0, listShow).map((r) => `
         <tr class="click" data-id="${r.id}">
-          <td class="nowrap"><a href="#/i/${r.id}">${esc(r.code)}</a></td>
+          <td class="nowrap"><a href="#/i/${r.id}">${esc(r.code)}</a>${changedIds.has(r.id)?` <span title="主責督導有異動紀錄" aria-label="有主責督導異動紀錄">✎</span>`:""}</td>
           <td class="nowrap">${fmtDate(r.inquiry_date)}</td>
           <td>${esc(r.region)}</td>
           <td class="nowrap">${esc(r.unit_name)}${r.case_manager ? `<div class="sub">個管 ${esc(r.case_manager)}</div>` : ''}</td>
@@ -363,6 +491,7 @@ async function viewList() {
           <td><span class="st s-${r.status}">${r.status}</span></td>
         </tr>`).join('') || '<tr><td colspan="10" class="empty">沒有符合條件的問案</td></tr>'}</tbody>
     </table>${shown.length > listShow ? `<div class="more"><button type="button" class="btn" id="more">再顯示 100 筆（還有 ${shown.length - listShow} 筆）</button></div>` : ''}</div>`;
+    $('#rotation-peek')?.addEventListener('click',()=>rotationShow(listState.region));
     $$('[data-region]').forEach((b) => (b.onclick = () => { listState.region = b.dataset.region; listShow = 100; draw(); }));
     $$('[data-status]').forEach((b) => (b.onclick = () => { listState.status = b.dataset.status; listShow = 100; draw(); }));
     $('#fyear').onchange = (e) => { listState.year = e.target.value; if (listState.year === '全部') listState.month = '全部'; listShow = 100; draw(); };
@@ -412,7 +541,19 @@ async function viewForm(id, presetStatus) {
   let r = { region: me.region || '新莊', inquiry_date: todayISO(), intake_staff_id: me.id, status: '問案中', condition_ids: [] };
   if (id) { const rows = await db.get('inquiries', { id: `eq.${id}`, select: '*' }); if (!rows.length) throw new Error('找不到這筆問案'); r = rows[0]; }
   if (presetStatus) r.status = presetStatus;
-  const staffOpts = (cur) => opt('', '請選擇', cur) + activeOr(L.staff, cur).map((s) => opt(s.id, s.name + (s.region ? `（${s.region}）` : ''), cur)).join('');
+  const rotation = await rotationState(r.region);
+  const hadRotation = id ? (await db.get('rotation_allocations',{inquiry_id:`eq.${id}`,select:'id',limit:1})).length>0 : false;
+  const originalLeadId = id ? r.lead_staff_id : null;
+  if (!id && rotation.enabled && rotation.next && r.status !== '未成案') r.lead_staff_id=rotation.next.staff_id;
+  // 輪接時只列出同區、在職督導；原主責若失去資格仍保留歷史顯示。
+  const staffOpts = (cur, region=null, rotationOnly=false) => {
+    const pool=L.staff.filter((s)=>(!region || s.region===region) && (!rotationOnly || (s.role==='supervisor' && s.active)));
+    const available=rotationOnly ? pool : activeOr(pool,cur);
+    const current=rotationOnly && cur && !available.some((s)=>String(s.id)===String(cur))
+      ? L.staff.find((s)=>String(s.id)===String(cur) && s.region===region) : null;
+    return opt('', '請選擇',cur) + available.map((s)=>opt(s.id,s.name+(s.region?`（${s.region}）`:''),cur)).join('')+
+      (current ? `<option value="${Number(current.id)}" selected>${esc(current.name)}（歷史主責，已不符合輪接資格）</option>` : '');
+  };
   $('#main').innerHTML = `
   <a href="${id ? `#/i/${id}` : '#/'}" class="small" style="text-decoration:none">← ${id ? '回問案明細' : '回問案列表'}</a>
   <div class="head" style="margin-top:10px"><h1>${id ? `編輯問案 ${esc(r.code)}` : '新增問案'}</h1></div>
@@ -449,7 +590,8 @@ async function viewForm(id, presetStatus) {
       <label class="f">狀態<select name="status" id="fstatus">${(id ? STATUSES : STATUSES.filter((s) => s !== '成案')).map((s) => opt(s, s, r.status)).join('')}</select></label>
       <label class="f">預計主責居服<input type="text" name="expected_caregiver" list="cglist" value="${esc(r.expected_caregiver || '')}" placeholder="媒合接受後會自動帶入"></label>
       <datalist id="cglist">${L.cg.filter((c) => c.active).map((c) => `<option value="${esc(c.name)}">`).join('')}</datalist>
-      <label class="f" data-for="成案">主責督導 <span class="req">*</span><select name="lead_staff_id">${staffOpts(r.lead_staff_id)}</select></label>
+      <label class="f" id="rotation-lead" data-for="成案">主責督導 <span class="req">*</span><select name="lead_staff_id">${staffOpts(r.lead_staff_id,r.region)}</select></label>
+      <div class="spanall small muted" id="rotation-note" hidden>輪接預覽僅供參考，實際分配以儲存時為準。若人工改派，必須填寫原因；新增問案與改派將在同一筆資料庫交易內完成。</div>
       <label class="f" data-for="成案">照會日期 <span class="req">*</span><input type="date" name="referral_date" value="${esc(r.referral_date || '')}"></label>
       <label class="f" data-for="成案">簽約日 <span class="req">*</span><input type="date" name="contract_date" value="${esc(r.contract_date || '')}"></label>
       <label class="f" data-for="成案">仁寶案號<input type="text" name="case_no" value="${esc(r.case_no || '')}" placeholder="選填，之後也能用個案比對批次帶入"></label>
@@ -461,8 +603,29 @@ async function viewForm(id, presetStatus) {
     <div style="display:flex;gap:8px;justify-content:flex-end"><a class="btn" href="${id ? `#/i/${id}` : '#/'}">取消</a><button type="submit" class="btn primary">儲存</button></div>
   </form>`;
   const f = $('#f');
-  const sync = () => { $$('[data-for]', f).forEach((el) => { el.hidden = el.dataset.for !== f.status.value; }); };
-  f.status.onchange = sync; sync();
+  // 已建立輪接歷程的問案不可改區，避免更新時才被資料庫拒絕。
+  if (id && hadRotation) {
+    f.region.disabled = true;
+    f.region.title = '已有輪接紀錄，不能變更問案區域；如需轉區請依機構正式轉案程序處理';
+  }
+  const rotationByRegion = { [r.region]: rotation };
+  const syncRotation = async () => {
+    const region=f.region.value;
+    if (!rotationByRegion[region]) rotationByRegion[region]=await rotationState(region);
+    const cfg=rotationByRegion[region];
+    const rotated=cfg.enabled && f.status.value!=='未成案';
+    const historical=id && hadRotation;
+    $('#rotation-lead').hidden= !rotated && !historical && f.status.value!=='成案';
+    $('#rotation-note').hidden= !rotated;
+    const select=f.lead_staff_id;
+    const previous=select.value;
+    select.innerHTML=staffOpts(previous,region,rotated || historical);
+    // 輪接問案僅管理者可人工改派；一般同仁可查看主責但不可變更。
+    select.disabled=Boolean((historical || rotated) && !isAdmin());
+    if (!id && rotated && cfg.next) select.value=String(cfg.next.staff_id);
+  };
+  const sync = () => { $$('[data-for]', f).forEach((el) => { el.hidden = el.dataset.for !== f.status.value; }); syncRotation().catch((e)=>toast(e.message,true)); };
+  f.status.onchange = sync; f.region.onchange=()=>{rotationByRegion[f.region.value]=null;syncRotation().catch((e)=>toast(e.message,true));};sync();
   const syncOther = () => { $('#cond-other-note').hidden = !$('input[data-other="1"]', f)?.checked; };
   $$('input[name=cond]', f).forEach((c) => (c.onchange = syncOther)); syncOther();
   if (!id) {
@@ -512,13 +675,38 @@ async function viewForm(id, presetStatus) {
     if (!body.region) miss.push('區域'); if (!body.inquiry_date) miss.push('問案日期'); if (!body.intake_staff_id) miss.push('收案督導');
     if (!body.unit_id) miss.push(unitNameRaw ? '轉介單位（輸入的名稱不在清單裡，請從建議選單選擇）' : '轉介單位'); if (!body.client_name) miss.push('個案姓名'); if (!body.address) miss.push('地址');
     if (!body.service_detail) miss.push('個案細項與安排');
-    if (body.status === '成案') { if (!body.lead_staff_id) miss.push('主責督導'); if (!body.referral_date) miss.push('照會日期'); if (!body.contract_date) miss.push('簽約日'); }
+    if (body.status === '成案') { if (!body.lead_staff_id && !rotationByRegion[body.region]?.enabled) miss.push('主責督導'); if (!body.referral_date) miss.push('照會日期'); if (!body.contract_date) miss.push('簽約日'); }
     if (body.status === '未成案' && !body.nc_reason_id) miss.push('未成案原因');
     const er = $('#ferr');
     if (miss.length) { er.textContent = `請填寫：${miss.join('、')}`; er.hidden = false; return; }
     const btn = $('button[type=submit]', f); btn.disabled = true;
     try {
-      const saved = id ? await db.update('inquiries', id, body) : await db.insert('inquiries', body);
+      const activeRotation = rotationByRegion[body.region]?.enabled && body.status!=='未成案';
+      const manuallyChanged = Boolean(id && hadRotation && body.lead_staff_id !== originalLeadId);
+      if ((manuallyChanged || (!id && activeRotation && body.lead_staff_id && Number(body.lead_staff_id) !== Number(rotationByRegion[body.region]?.next?.staff_id))) && !isAdmin()) throw new Error('僅管理者可以人工改派主責督導');
+      const overrideOnCreate = !id && activeRotation && body.lead_staff_id && Number(body.lead_staff_id) !== Number(rotationByRegion[body.region]?.next?.staff_id);
+      let reason=null;
+      if (manuallyChanged || overrideOnCreate) {
+        reason=await rotationAskReason(L.staffById[id ? originalLeadId : rotationByRegion[body.region]?.next?.staff_id]?.name||'未分配',L.staffById[body.lead_staff_id]?.name||'—');
+        if (!reason) {btn.disabled=false;return;}
+      }
+      if (manuallyChanged && !body.lead_staff_id) throw new Error('主責督導不得清空，請選擇新主責督導並填寫原因');
+      let saved;
+      if (id && hadRotation) {
+        // 不分輪接目前是否啟用，已有輪接歷程的問案一律走原子 RPC。
+        saved=await rotationSave(id,body,manuallyChanged ? Number(body.lead_staff_id) : null,reason);
+      } else if (!id && activeRotation) {
+        // 只傳使用者主動選擇的改派；實際輪接預覽可能因他人搶先儲存而變動。
+        // 帶入預覽時的原順位供資料庫核對；若其他問案先占用順位，需重新確認改派。
+        const payload = overrideOnCreate
+          ? { ...body, rotation_preview_staff_id: Number(rotationByRegion[body.region]?.next?.staff_id) }
+          : body;
+        saved=await rotationSave(null,payload,overrideOnCreate ? Number(body.lead_staff_id) : null,reason);
+      } else if (id) {
+        saved=await db.update('inquiries',id,body);
+      } else {
+        saved=await db.insert('inquiries',body);
+      }
       toast(id ? '已儲存' : `已新增問案 ${saved.code}`);
       location.hash = `#/i/${saved.id}`;
     } catch (err) { er.textContent = err.message; er.hidden = false; btn.disabled = false; }
@@ -565,6 +753,7 @@ async function viewDetail(id) {
   ]);
   if (!rows.length) throw new Error('找不到這筆問案');
   const r = rows[0];
+  const rotationHistory = await rotationChanges(id);
   const dd = (label, val, wide) => `<div class="${wide ? 'wide' : ''}"><dt>${label}</dt><dd>${val || '<span class="faint">—</span>'}</dd></div>`;
   const nRej = matches.filter((m) => m.result === '拒絕').length, nAcc = matches.filter((m) => m.result === '接受').length, nWait = matches.filter((m) => m.result === '待回覆').length;
   const logItems = logs.map((a) => { const d = describeLog(a); return d ? `<li>${fmtTime(a.at)} ${esc(a.actor_name || '')}｜${esc(d)}</li>` : ''; }).join('');
@@ -586,6 +775,7 @@ async function viewDetail(id) {
     <section class="card side stack">
       <h2>問案資料</h2>
       <dl class="data">
+        ${rotationHistory.length ? dd('主責異動', `<span title="已有異動紀錄">✎ 有 ${rotationHistory.length} 筆紀錄</span>`) : ''}
         ${dd('轉介單位', esc(r.unit_name))}${dd('個管師', esc(r.case_manager))}
         ${dd('收案督導', esc(r.intake_name))}${dd('主責督導', esc(r.lead_name))}
         ${dd('地址', esc(r.address), true)}
@@ -599,6 +789,7 @@ async function viewDetail(id) {
       </dl>
     </section>
     <section class="main stack">
+      ${rotationHistory.length?`<div class="card"><h2>主責督導異動歷程</h2><ul class="rotation-history">${rotationChangeLines(rotationHistory)}</ul></div>`:''}
       <div class="card">
         <div style="display:flex;align-items:baseline;gap:12px;flex-wrap:wrap;margin-bottom:6px">
           <h2>媒合紀錄</h2>
@@ -613,6 +804,7 @@ async function viewDetail(id) {
     ${logItems ? `<ul>${logItems}</ul>` : '<p class="muted small">沒有修改紀錄（匯入的舊資料不會產生紀錄）。</p>'}
   </details>`;
 
+  $$('[data-amend]').forEach((b)=>b.onclick=()=>rotationAmend(Number(b.dataset.amend)));
   drawMatchForm(r, null);
   $$('[data-edit-match]').forEach((b) => (b.onclick = () => { drawMatchForm(r, matches.find((m) => m.id === Number(b.dataset.editMatch))); $('#mform-box').scrollIntoView({ behavior: 'smooth' }); }));
   $$('[data-del-match]').forEach((b) => (b.onclick = async () => {
@@ -718,32 +910,61 @@ function drawMatchForm(inq, m) {
 }
 
 /* 居服員接受媒合後，詢問是否直接標記成案並補齊進階欄位 */
-function promptAcceptCase(inq) {
+async function promptAcceptCase(inq) {
+  const hasRotation = (await db.get('rotation_allocations',{inquiry_id:`eq.${inq.id}`,select:'id',limit:1})).length>0;
   return new Promise((resolve) => {
-    const staffOpts = (cur) => opt('', '請選擇', cur) + activeOr(L.staff, cur).map((s) => opt(s.id, s.name + (s.region ? `（${s.region}）` : ''), cur)).join('');
+    // 已輪接的問案只能從同區在職督導中選擇改派對象；避免跨區或非督導人員。
+    const candidates = hasRotation
+      ? L.staff.filter((s) => s.region === inq.region && s.active && s.role === 'supervisor')
+      : activeOr(L.staff, inq.lead_staff_id);
+    const currentLead = hasRotation ? inq.lead_staff_id : (inq.lead_staff_id || me.id);
+    const staffOpts = opt('', '請選擇', currentLead) + candidates.map((s) => opt(s.id, s.name + (s.region ? `（${s.region}）` : ''), currentLead)).join('');
     modal(`<h2>居服員已接受，要標記成案嗎？</h2>
       <p class="muted small" style="margin:0 0 8px">確定承接才需要填寫以下欄位，之後也可以在問案明細裡補填。</p>
       <div class="stack">
-        <label class="f">主責督導 <span class="req">*</span><select name="lead_staff_id">${staffOpts(me.id)}</select></label>
+        <label class="f">主責督導 <span class="req">*</span><select name="lead_staff_id" ${hasRotation && !isAdmin() ? 'disabled' : ''}>${staffOpts}</select></label>
+        ${hasRotation ? `<label class="f" id="accept-reason-wrap" hidden>更換主責督導原因 <span class="req">*</span>
+          <textarea name="rotation_reason" rows="3" placeholder="請說明更換原因，將保留異動歷程"></textarea></label>` : ''}
         <label class="f">照會日期 <span class="req">*</span><input type="date" name="referral_date" value="${esc(todayISO())}"></label>
         <label class="f">簽約日 <span class="req">*</span><input type="date" name="contract_date"></label>
         <p class="err-text" id="acerr" hidden></p>
       </div>
       <div class="acts"><button type="button" class="btn" data-no>先不要</button><button type="button" class="btn primary" data-yes>標記成案</button></div>`,
     (box, close) => {
+      const lead = $('[name=lead_staff_id]', box);
+      const reasonWrap = $('#accept-reason-wrap', box);
+      const refreshReason = () => {
+        if (reasonWrap) reasonWrap.hidden = Number(lead.value) === Number(inq.lead_staff_id);
+      };
+      lead.onchange = refreshReason; refreshReason();
       $('[data-no]', box).onclick = () => { close(); resolve(); };
       $('[data-yes]', box).onclick = async () => {
-        const lead_staff_id = $('[name=lead_staff_id]', box).value ? Number($('[name=lead_staff_id]', box).value) : null;
+        const lead_staff_id = lead.value ? Number(lead.value) : null;
         const referral_date = $('[name=referral_date]', box).value || null;
         const contract_date = $('[name=contract_date]', box).value || null;
+        if (hasRotation && !isAdmin() && lead_staff_id !== Number(inq.lead_staff_id)) { $('#acerr', box).textContent='僅管理者可以人工改派主責督導'; $('#acerr', box).hidden=false; return; }
+        const reason = hasRotation && lead_staff_id !== Number(inq.lead_staff_id)
+          ? $('[name=rotation_reason]', box).value.trim() : null;
         const er = $('#acerr', box);
         const miss = [];
-        if (!lead_staff_id) miss.push('主責督導'); if (!referral_date) miss.push('照會日期'); if (!contract_date) miss.push('簽約日');
+        if (!lead_staff_id) miss.push('主責督導');
+        if (!referral_date) miss.push('照會日期');
+        if (!contract_date) miss.push('簽約日');
+        if (hasRotation && lead_staff_id !== Number(inq.lead_staff_id) && !reason) miss.push('更換主責督導原因');
         if (miss.length) { er.textContent = `請填寫：${miss.join('、')}`; er.hidden = false; return; }
+        const submit = $('[data-yes]', box);
+        submit.disabled = true;
         try {
-          await db.update('inquiries', inq.id, { status: '成案', lead_staff_id, referral_date, contract_date });
+          if (hasRotation) {
+            await rotationRpc('rotation_accept_case', {
+              p_inquiry_id:inq.id, p_lead_staff_id:lead_staff_id,
+              p_referral_date:referral_date, p_contract_date:contract_date, p_reason:reason
+            });
+          } else {
+            await db.update('inquiries', inq.id, { status: '成案', lead_staff_id, referral_date, contract_date });
+          }
           close(); resolve();
-        } catch (e) { er.textContent = e.message; er.hidden = false; }
+        } catch (e) { er.textContent = e.message; er.hidden = false; submit.disabled = false; }
       };
     });
   });
@@ -2201,6 +2422,7 @@ const ADMIN_TABS = {
   cg: { label: '居服員', table: 'caregivers' }, staff: { label: '督導與帳號', table: 'staff' },
 };
 async function viewAdmin(tab) {
+  if (tab === 'rotation' && isAdmin()) return viewRotationAdmin();
   if (!ADMIN_TABS[tab]) tab = 'units';
   const T = ADMIN_TABS[tab];
   const rows = await db.all(T.table, { order: tab === 'cg' || tab === 'staff' ? 'active.desc,code,name' : 'active.desc,sort,name' });
@@ -2222,7 +2444,7 @@ async function viewAdmin(tab) {
   const canDelete = isAdmin() && (tab === 'cg' || tab === 'staff');
   $('#main').innerHTML = `
   <div class="head"><div><h1>管理</h1><div class="muted small" style="margin-top:4px">選項不刪除，不用的改成停用；停用後不會出現在下拉選單，但舊紀錄仍保留。${canDelete ? '居服員／督導如果是輸入錯誤（非離職），管理者可以直接刪除。' : ''}</div></div></div>
-  <nav class="tabs" aria-label="管理項目">${Object.entries(ADMIN_TABS).map(([k, v]) => `<a href="#/admin/${k}" class="${k === tab ? 'on' : ''}">${v.label}</a>`).join('')}</nav>
+  <nav class="tabs" aria-label="管理項目">${Object.entries(ADMIN_TABS).map(([k, v]) => `<a href="#/admin/${k}" class="${k === tab ? 'on' : ''}">${v.label}</a>`).join('')}${isAdmin()?'<a href="#/admin/rotation">輪接</a>':''}</nav>
   ${tab === 'staff' ? '<div class="card small" style="margin-bottom:16px;color:var(--ink2)">新增登入帳號要在 Supabase 後台建立，再把帳號連到這裡的姓名，步驟見設定說明。主任與管理者可以判定拒案、刪除紀錄、管理選項。</div>' : ''}
   <div class="tbox"><table class="t" style="min-width:640px">
     <thead><tr>${head}<th style="width:80px">啟用</th><th style="width:90px"></th>${canDelete ? '<th style="width:70px"></th>' : ''}</tr></thead>

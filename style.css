@@ -157,3 +157,10 @@ details.log ul { margin: 12px 0 0; padding-left: 20px; display: flex; flex-direc
 .err-text { color: var(--bad-strong); font-size: 14px; }
 .empty { padding: 36px; text-align: center; color: var(--muted); }
 .more { display: flex; justify-content: center; padding: 14px; }
+
+/* 居督輪接 */
+.rotation-sequence { padding: 12px; line-height: 1.9; background: var(--accent-l); border-radius: 8px; overflow-wrap: anywhere; }
+.rotation-edit-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--line2); }
+.rotation-edit-row > select { flex: 1 1 180px; max-width: 320px; }
+.rotation-history { padding-left: 18px; line-height: 2.1; }
+.rotation-history li { margin: 6px 0; }
