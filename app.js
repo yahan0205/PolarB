@@ -839,6 +839,10 @@ async function viewDetail(id) {
   if (!rows.length) throw new Error('找不到這筆問案');
   const r = rows[0];
   const rotationHistory = await rotationChanges(id);
+  // 判斷刪除時要不要走輪接專用流程，不能只看「有沒有改派紀錄」（rotation_changes）——
+  // 只要透過輪接自動分配過，即使從沒被人工改派，rotation_allocations 也會有紀錄，
+  // 資料庫的刪除保護是兩張表任一有紀錄就擋，這裡要跟資料庫判斷一致。
+  const hasRotationAlloc = (await db.get('rotation_allocations', { inquiry_id: `eq.${id}`, select: 'id', limit: 1 })).length > 0;
   const dd = (label, val, wide) => `<div class="${wide ? 'wide' : ''}"><dt>${label}</dt><dd>${val || '<span class="faint">—</span>'}</dd></div>`;
   const nRej = matches.filter((m) => m.result === '拒絕').length, nAcc = matches.filter((m) => m.result === '接受').length, nWait = matches.filter((m) => m.result === '待回覆').length;
   const logItems = logs.map((a) => { const d = describeLog(a); return d ? `<li>${fmtTime(a.at)} ${esc(a.actor_name || '')}｜${esc(d)}</li>` : ''; }).join('');
@@ -901,7 +905,7 @@ async function viewDetail(id) {
     try { await db.update('matches', Number(mid), { judgement: val || null }); toast('已判定'); refreshJudgeCount(); render(); } catch (e) { toast(e.message, true); }
   }));
   $('#del')?.addEventListener('click', async () => {
-    if (rotationHistory.length) {
+    if (hasRotationAlloc || rotationHistory.length) {
       if (!isAdmin()) { toast('僅管理者可以刪除有輪接歷程的問案', true); return; }
       const reason = await rotationAskDeleteReason(r.code);
       if (!reason) return;
