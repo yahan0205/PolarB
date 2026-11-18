@@ -58,6 +58,7 @@ legend { font-size: 13px; color: var(--ink2); padding: 0; margin-bottom: 6px; }
 .head { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 12px 16px; margin-bottom: 18px; }
 .head .right { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; }
 .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 20px; }
+.svc-segment { background: var(--chip); border-color: var(--line2); padding: 14px; }
 .stack { display: flex; flex-direction: column; gap: 16px; }
 .grid2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px 18px; }
 .grid3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px 18px; }

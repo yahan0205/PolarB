@@ -23,6 +23,15 @@ const fmtTime = (ts) => { if (!ts) return ''; const d = new Date(ts); return `${
 // 不是這個格式的字串（例如「尚無訪視歷史」這種文字狀態）原樣輸出，不強制轉換。
 const fmtMonth = (ym) => { if (!ym || !/^\d{4}-\d{2}$/.test(ym)) return ym || ''; const [y, m] = ym.split('-'); return `${Number(y) - 1911}/${m}`; };
 const opt = (v, label, sel) => `<option value="${esc(v)}"${String(v) === String(sel ?? '') ? ' selected' : ''}>${esc(label)}</option>`;
+// 00:00~24:00、每 5 分鐘一格的時間下拉選單（給個案細項與安排的時段用），避免原生 time 欄位跳出上午/下午選擇。
+const TIME_OPTIONS = (() => {
+  const out = ['<option value="">--:--</option>'];
+  for (let m = 0; m <= 24 * 60; m += 5) {
+    const v = `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`;
+    out.push(`<option value="${v}">${v}</option>`);
+  }
+  return out.join('');
+})();
 const REGIONS = ['新莊', '淡水'];
 const STATUSES = ['問案中', '成案', '未成案'];
 
@@ -567,20 +576,15 @@ async function viewForm(id, presetStatus) {
       <label class="f">個管師<input type="text" name="case_manager" value="${esc(r.case_manager || '')}" placeholder="姓氏即可"></label>
       <label class="f">個案姓名 <span class="req">*</span><input type="text" name="client_name" value="${esc(r.client_name || '')}"></label>
       <label class="f spanall">地址（區／路名即可） <span class="req">*</span><input type="text" name="address" value="${esc(r.address || '')}"></label>
-      ${id ? `<label class="f spanall">個案細項與安排 <span class="req">*</span><textarea name="service_detail" placeholder="頻次、時段、碼別，例：W1.3.5 BA16">${esc(r.service_detail || '')}</textarea></label>` : `
       <fieldset class="spanall" id="svc-builder">
         <legend>個案細項與安排 <span class="req">*</span></legend>
-        <p class="small muted" style="margin:0 0 6px">勾選星期、時段、碼別，系統會自動組成統一格式，例如：W135 08:00-09:00 BA13/BA20*2</p>
-        <div class="checks">${['一', '二', '三', '四', '五', '六', '日'].map((d, i) => `<label><input type="checkbox" name="svc_day" value="${i + 1}">週${d}</label>`).join('')}</div>
-        <div class="grid3" style="margin-top:8px">
-          <label class="f">開始時間<input type="time" name="svc_start"></label>
-          <label class="f">結束時間<input type="time" name="svc_end"></label>
-        </div>
-        <div class="checks" style="margin-top:8px">${activeOr(L.sc, null).map((c) => `<label class="svc-code"><input type="checkbox" name="svc_code" value="${c.id}" data-code="${esc(c.code || '')}">${esc(c.code ? c.code + ' ' : '')}${esc(c.name)}<input type="number" name="svc_qty" data-for="${c.id}" min="1" value="1" style="width:48px;margin-left:4px" hidden></label>`).join('')}</div>
-        <label class="f spanall" style="margin-top:8px">補充說明<input type="text" name="svc_note" placeholder="其他安排細節（選填）"></label>
+        <p class="small muted" style="margin:0 0 6px">每個時段可各自勾選星期、選時間（24 小時制下拉選單）、選碼別並補充說明；同一個案不同天時段不同時，按「＋ 增加時段」多開一組。</p>
+        <div id="svc-segments" class="stack"></div>
+        <div class="acts" style="margin-top:8px"><button class="btn" type="button" id="svc-add">＋ 增加時段</button></div>
+        <label class="f spanall" style="margin-top:8px">其他補充說明<textarea name="svc_extra" placeholder="不屬於單一時段的補充內容${id ? '（原始內容已帶入，可直接編輯）' : '（選填）'}"></textarea></label>
         <div class="small muted" style="margin-top:6px">預覽：<span id="svc-preview" class="mono">（尚未填寫）</span></div>
         <textarea name="service_detail" hidden></textarea>
-      </fieldset>`}
+      </fieldset>
       <fieldset class="spanall"><legend>特殊條件</legend><div class="checks">${activeOr(L.cond, null).concat(L.cond.filter((c) => !c.active && (r.condition_ids || []).includes(c.id))).map((c) => `<label><input type="checkbox" name="cond" value="${c.id}" data-other="${c.name === '其他' ? '1' : ''}" ${(r.condition_ids || []).includes(c.id) ? 'checked' : ''}>${esc(c.name)}</label>`).join('')}</div>
         <label class="f" id="cond-other-note" hidden>其他說明<input type="text" name="condition_other_note" value="${esc(r.condition_other_note || '')}"></label>
       </fieldset>
@@ -628,29 +632,61 @@ async function viewForm(id, presetStatus) {
   f.status.onchange = sync; f.region.onchange=()=>{rotationByRegion[f.region.value]=null;syncRotation().catch((e)=>toast(e.message,true));};sync();
   const syncOther = () => { $('#cond-other-note').hidden = !$('input[data-other="1"]', f)?.checked; };
   $$('input[name=cond]', f).forEach((c) => (c.onchange = syncOther)); syncOther();
-  if (!id) {
-    const syncSvc = () => {
-      $$('input[name=svc_code]', f).forEach((cb) => { const q = $(`input[name=svc_qty][data-for="${cb.value}"]`, f); if (q) q.hidden = !cb.checked; });
-      const days = $$('input[name=svc_day]:checked', f).map((c) => c.value);
-      const codes = $$('input[name=svc_code]:checked', f).map((c) => {
-        const qty = Number($(`input[name=svc_qty][data-for="${c.value}"]`, f)?.value || 1);
-        return c.dataset.code + (qty > 1 ? `*${qty}` : '');
-      });
-      const start = f.svc_start.value, end = f.svc_end.value;
-      const note = f.svc_note.value.trim();
-      const parts = [];
-      if (days.length) parts.push('W' + days.join(''));
-      if (start && end) parts.push(`${start}-${end}`);
-      if (codes.length) parts.push(codes.join('/'));
-      let s = parts.join(' ');
-      if (note) s += (s ? '　' : '') + note;
-      f.service_detail.value = s;
-      $('#svc-preview').textContent = s || '（尚未填寫）';
-    };
-    $('#svc-builder').addEventListener('input', syncSvc);
-    $('#svc-builder').addEventListener('change', syncSvc);
-    syncSvc();
+  // 多時段建構工具：每個時段是獨立的卡片（DOM 直接是資料來源），新增/移除只動單一卡片，
+  // 不整批重繪，才不會讓使用者正在打字的其他卡片被清空或失焦。
+  const segLine = (card) => {
+    const days = $$('.seg-day:checked', card).map((c) => c.value);
+    const codes = $$('.seg-code:checked', card).map((c) => {
+      const qty = Number($(`.seg-qty[data-for="${c.value}"]`, card)?.value || 1);
+      return c.dataset.code + (qty > 1 ? `*${qty}` : '');
+    });
+    const start = $('.seg-start', card).value.trim(), end = $('.seg-end', card).value.trim();
+    const note = $('.seg-note', card).value.trim();
+    const parts = [];
+    if (days.length) parts.push('W' + days.join(''));
+    if (start && end) parts.push(`${start}-${end}`);
+    if (codes.length) parts.push(codes.join('/'));
+    let s = parts.join(' ');
+    if (note) s += (s ? '　' : '') + note;
+    return s;
+  };
+  const syncSvc = () => {
+    $$('.svc-segment', f).forEach((card) => {
+      $$('.seg-code', card).forEach((cb) => { const q = $(`.seg-qty[data-for="${cb.value}"]`, card); if (q) q.hidden = !cb.checked; });
+    });
+    const lines = $$('.svc-segment', f).map(segLine).filter(Boolean);
+    const extra = f.svc_extra.value.trim();
+    if (extra) lines.push(extra);
+    const s = lines.join('\n');
+    f.service_detail.value = s;
+    $('#svc-preview').textContent = s || '（尚未填寫）';
+  };
+  const addSegmentCard = () => {
+    const card = document.createElement('div');
+    card.className = 'svc-segment card stack';
+    card.innerHTML = `
+      <div class="checks">${['一', '二', '三', '四', '五', '六', '日'].map((d, i) => `<label><input type="checkbox" class="seg-day" value="${i + 1}">週${d}</label>`).join('')}</div>
+      <div class="grid3" style="margin-top:8px">
+        <label class="f">開始時間<select class="seg-start">${TIME_OPTIONS}</select></label>
+        <label class="f">結束時間<select class="seg-end">${TIME_OPTIONS}</select></label>
+      </div>
+      <div class="checks" style="margin-top:8px">${activeOr(L.sc, null).map((c) => `<label class="svc-code"><input type="checkbox" class="seg-code" value="${c.id}" data-code="${esc(c.code || '')}">${esc(c.code ? c.code + ' ' : '')}${esc(c.name)}<input type="number" class="seg-qty" data-for="${c.id}" min="1" value="1" style="width:48px;margin-left:4px" hidden></label>`).join('')}</div>
+      <label class="f spanall" style="margin-top:8px">此時段說明<input type="text" class="seg-note" placeholder="（選填）"></label>
+      <div class="acts" style="margin-top:6px"><button type="button" class="btn seg-remove">移除此時段</button></div>`;
+    $('#svc-segments').appendChild(card);
+    $('.seg-remove', card).onclick = () => { card.remove(); syncSvc(); };
+  };
+  $('#svc-builder').addEventListener('input', syncSvc);
+  $('#svc-builder').addEventListener('change', syncSvc);
+  $('#svc-add').onclick = addSegmentCard;
+  if (id) {
+    // 既有問案的舊格式無法可靠反解析回時段卡片，原文整段帶入「其他補充說明」，不遺失資料；
+    // 使用者可以視需要另外用「＋ 增加時段」把部分內容拆成結構化時段。
+    f.svc_extra.value = r.service_detail || '';
+  } else {
+    addSegmentCard();
   }
+  syncSvc();
   if (presetStatus) $(`[data-for="${presetStatus}"] select, [data-for="${presetStatus}"] input`, f)?.focus();
   f.onsubmit = async (e) => {
     e.preventDefault();
@@ -675,6 +711,10 @@ async function viewForm(id, presetStatus) {
     if (!body.region) miss.push('區域'); if (!body.inquiry_date) miss.push('問案日期'); if (!body.intake_staff_id) miss.push('收案督導');
     if (!body.unit_id) miss.push(unitNameRaw ? '轉介單位（輸入的名稱不在清單裡，請從建議選單選擇）' : '轉介單位'); if (!body.client_name) miss.push('個案姓名'); if (!body.address) miss.push('地址');
     if (!body.service_detail) miss.push('個案細項與安排');
+    $$('.svc-segment', f).forEach((card, i) => {
+      const s = $('.seg-start', card).value, en = $('.seg-end', card).value;
+      if ((s && !en) || (!s && en)) miss.push(`第 ${i + 1} 個時段的起訖時間請選完整或都留空`);
+    });
     if (body.status === '成案') { if (!body.lead_staff_id && !rotationByRegion[body.region]?.enabled) miss.push('主責督導'); if (!body.referral_date) miss.push('照會日期'); if (!body.contract_date) miss.push('簽約日'); }
     if (body.status === '未成案' && !body.nc_reason_id) miss.push('未成案原因');
     const er = $('#ferr');
