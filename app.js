@@ -340,6 +340,28 @@ async function rotationState(region) {
   const sequence = freed.length ? Math.min(...freed) : Number(cfg.next_sequence);
   return { ...cfg, slots, next: { sequence, staff_id: slots[(sequence - 1) % slots.length].staff_id, isBackfill: !!freed.length } };
 }
+// 輪接現況表：每個順位目前是否有「正在進行中」的問案，沒有的人（含從未分配到、或曾分配但被未成案／
+// 刪除釋出）排最前面，方便看出這個循環裡誰最需要優先補案。
+async function rotationStatusBoard(region) {
+  const s = await rotationState(region);
+  if (!s.enabled || !s.slots.length) return null;
+  const n = s.slots.length;
+  const allocs = await db.all('rotation_allocations', { region: `eq.${region}`, generation: `eq.${s.generation}`, select: 'sequence_number,released_at,inquiry_id' });
+  const openByPos = {};
+  allocs.filter((a) => !a.released_at).forEach((a) => { openByPos[((Number(a.sequence_number) - 1) % n) + 1] = a.inquiry_id; });
+  const ids = Object.values(openByPos).filter(Boolean);
+  let infoById = {};
+  if (ids.length) {
+    const rows = await db.get('inquiries', { id: `in.(${ids.join(',')})`, select: 'id,code,client_name' });
+    infoById = Object.fromEntries(rows.map((x) => [x.id, `${x.code}${x.client_name ? '　' + x.client_name : ''}`]));
+  }
+  const rows = s.slots.map((sl) => {
+    const waiting = !openByPos[sl.position];
+    return { position: sl.position, name: L.staffById[sl.staff_id]?.name || '未知人員', waiting, label: waiting ? '待承接' : (infoById[openByPos[sl.position]] || '處理中') };
+  });
+  rows.sort((a, b) => (a.waiting === b.waiting ? a.position - b.position : (a.waiting ? -1 : 1)));
+  return rows;
+}
 function rotationNames(s) { return (s.slots || []).map((x) => `${x.position}. ${L.staffById[x.staff_id]?.name || '未知人員'}`).join(' → '); }
 async function rotationShow(region) {
   if (region === '全部') region = me.region || REGIONS[0];
@@ -369,6 +391,21 @@ function rotationAskReason(fromName, toName) {
       $('[data-confirm]', box).onclick = () => {
         const reason = $('#rotation-reason',box).value.trim();
         if (!reason) { $('#rotation-reason-error',box).textContent = '請填寫異動原因'; $('#rotation-reason-error',box).hidden = false; return; }
+        resolve(reason); close();
+      };
+    }, () => resolve(null));
+  });
+}
+function rotationAskDeleteReason(code) {
+  return new Promise((resolve) => {
+    modal(`<h2>刪除有輪接歷程的問案</h2><p>問案「${esc(code)}」已有輪接歷程，刪除後輪接的順位分配與異動紀錄仍會保留，不會一併刪除。</p>
+      <label class="f">刪除原因 <span class="req">*</span><textarea id="rotation-del-reason" rows="3" placeholder="請說明刪除原因"></textarea></label>
+      <p class="err-text" id="rotation-del-reason-error" hidden></p>
+      <div class="acts"><button type="button" class="btn" data-cancel>取消</button><button type="button" class="btn ghost-danger" data-confirm>確認刪除</button></div>`, (box, close) => {
+      $('[data-cancel]', box).onclick = () => { close(); resolve(null); };
+      $('[data-confirm]', box).onclick = () => {
+        const reason = $('#rotation-del-reason',box).value.trim();
+        if (!reason) { $('#rotation-del-reason-error',box).textContent = '請填寫刪除原因'; $('#rotation-del-reason-error',box).hidden = false; return; }
         resolve(reason); close();
       };
     }, () => resolve(null));
@@ -596,6 +633,7 @@ async function viewForm(id, presetStatus) {
       <datalist id="cglist">${L.cg.filter((c) => c.active).map((c) => `<option value="${esc(c.name)}">`).join('')}</datalist>
       <label class="f" id="rotation-lead" data-for="成案">主責督導 <span class="req">*</span><select name="lead_staff_id">${staffOpts(r.lead_staff_id,r.region)}</select></label>
       <div class="spanall small muted" id="rotation-note" hidden>輪接預覽僅供參考，實際分配以儲存時為準。若人工改派，必須填寫原因；新增問案與改派將在同一筆資料庫交易內完成。</div>
+      ${!id ? `<div class="spanall card" id="rotation-board" hidden><h2 class="small" style="margin:0 0 8px">輪接現況（僅供查看）</h2><div id="rotation-board-body" class="small mono"></div></div>` : ''}
       <label class="f" data-for="成案">照會日期 <span class="req">*</span><input type="date" name="referral_date" value="${esc(r.referral_date || '')}"></label>
       <label class="f" data-for="成案">簽約日 <span class="req">*</span><input type="date" name="contract_date" value="${esc(r.contract_date || '')}"></label>
       <label class="f" data-for="成案">仁寶案號<input type="text" name="case_no" value="${esc(r.case_no || '')}" placeholder="選填，之後也能用個案比對批次帶入"></label>
@@ -627,6 +665,14 @@ async function viewForm(id, presetStatus) {
     // 輪接問案僅管理者可人工改派；一般同仁可查看主責但不可變更。
     select.disabled=Boolean((historical || rotated) && !isAdmin());
     if (!id && rotated && cfg.next) select.value=String(cfg.next.staff_id);
+    if (!id) {
+      const board = $('#rotation-board');
+      if (cfg.enabled) {
+        const rows = await rotationStatusBoard(region);
+        $('#rotation-board-body').innerHTML = (rows || []).map((x) => `${esc(x.name)} - ${esc(x.label)}`).join('<br>');
+        board.hidden = false;
+      } else { board.hidden = true; }
+    }
   };
   const sync = () => { $$('[data-for]', f).forEach((el) => { el.hidden = el.dataset.for !== f.status.value; }); syncRotation().catch((e)=>toast(e.message,true)); };
   f.status.onchange = sync; f.region.onchange=()=>{rotationByRegion[f.region.value]=null;syncRotation().catch((e)=>toast(e.message,true));};sync();
@@ -856,6 +902,14 @@ async function viewDetail(id) {
     try { await db.update('matches', Number(mid), { judgement: val || null }); toast('已判定'); refreshJudgeCount(); render(); } catch (e) { toast(e.message, true); }
   }));
   $('#del')?.addEventListener('click', async () => {
+    if (rotationHistory.length) {
+      if (!isAdmin()) { toast('僅管理者可以刪除有輪接歷程的問案', true); return; }
+      const reason = await rotationAskDeleteReason(r.code);
+      if (!reason) return;
+      try { await rotationRpc('rotation_delete_inquiry', { p_inquiry_id: id, p_reason: reason }); toast('已刪除'); location.hash = '#/'; }
+      catch (e) { toast(e.message, true); }
+      return;
+    }
     if (!(await confirmBox(`確定要刪除問案 ${r.code} 嗎？底下的媒合紀錄也會一起刪除，無法復原。`, '刪除', true))) return;
     try { await db.remove('inquiries', id); toast('已刪除'); location.hash = '#/'; } catch (e) { toast(e.message, true); }
   });
