@@ -340,24 +340,23 @@ async function rotationState(region) {
   const sequence = freed.length ? Math.min(...freed) : Number(cfg.next_sequence);
   return { ...cfg, slots, next: { sequence, staff_id: slots[(sequence - 1) % slots.length].staff_id, isBackfill: !!freed.length } };
 }
-// 輪接現況表：每個順位目前是否有「正在進行中」的問案，沒有的人（含從未分配到、或曾分配但被未成案／
-// 刪除釋出）排最前面，方便看出這個循環裡誰最需要優先補案。
+// 輪接現況表：照「目前實際主責居督」判斷每個順位的人手上有沒有案子，不是照「原始分配到哪個順位」。
+// 這樣人工改派進來的案子，會正確顯示在接收者名下；被改派走、或未成案／被刪除釋出的人則顯示待承接。
 async function rotationStatusBoard(region) {
   const s = await rotationState(region);
   if (!s.enabled || !s.slots.length) return null;
-  const n = s.slots.length;
-  const allocs = await db.all('rotation_allocations', { region: `eq.${region}`, generation: `eq.${s.generation}`, select: 'sequence_number,released_at,inquiry_id' });
-  const openByPos = {};
-  allocs.filter((a) => !a.released_at).forEach((a) => { openByPos[((Number(a.sequence_number) - 1) % n) + 1] = a.inquiry_id; });
-  const ids = Object.values(openByPos).filter(Boolean);
-  let infoById = {};
+  const allocs = await db.all('rotation_allocations', { region: `eq.${region}`, generation: `eq.${s.generation}`, select: 'inquiry_id' });
+  const ids = [...new Set(allocs.map((a) => a.inquiry_id).filter(Boolean))];
+  let byLead = {};
   if (ids.length) {
-    const rows = await db.get('inquiries', { id: `in.(${ids.join(',')})`, select: 'id,code,client_name' });
-    infoById = Object.fromEntries(rows.map((x) => [x.id, `${x.code}${x.client_name ? '　' + x.client_name : ''}`]));
+    const rows = await db.get('inquiries', { id: `in.(${ids.join(',')})`, select: 'id,code,client_name,lead_staff_id,status' });
+    rows.filter((r) => r.status !== '未成案' && r.lead_staff_id).forEach((r) => {
+      if (!byLead[r.lead_staff_id]) byLead[r.lead_staff_id] = `${r.code}${r.client_name ? '　' + r.client_name : ''}`;
+    });
   }
   const rows = s.slots.map((sl) => {
-    const waiting = !openByPos[sl.position];
-    return { position: sl.position, name: L.staffById[sl.staff_id]?.name || '未知人員', waiting, label: waiting ? '待承接' : (infoById[openByPos[sl.position]] || '處理中') };
+    const label = byLead[sl.staff_id];
+    return { position: sl.position, name: L.staffById[sl.staff_id]?.name || '未知人員', waiting: !label, label: label || '待承接' };
   });
   rows.sort((a, b) => (a.waiting === b.waiting ? a.position - b.position : (a.waiting ? -1 : 1)));
   return rows;
