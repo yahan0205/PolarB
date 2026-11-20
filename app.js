@@ -586,7 +586,14 @@ async function viewList() {
     $('#fyear').onchange = (e) => { listState.year = e.target.value; if (listState.year === '全部') listState.month = '全部'; listShow = 100; draw(); };
     $('#fmonth').onchange = (e) => { listState.month = e.target.value; listShow = 100; draw(); };
     $('#fmine').onchange = (e) => { listState.mine = e.target.checked; listShow = 100; draw(); };
-    $('#fneedsfollowup').onchange = (e) => { listState.needsFollowup = e.target.checked; listShow = 100; draw(); };
+    // 「成案資料待補」篩選出來的一定是狀態=成案的問案；如果使用者之前把上面的狀態
+    // 篩選停在「問案中」或「未成案」，兩個條件會互相打架，篩出 0 筆卻還顯示待補筆數
+    // 的徽章，看起來像 bug。勾選時順手把狀態篩選重設回「全部」，避免這種衝突。
+    $('#fneedsfollowup').onchange = (e) => {
+      listState.needsFollowup = e.target.checked;
+      if (listState.needsFollowup && listState.status !== '全部' && listState.status !== '成案') listState.status = '全部';
+      listShow = 100; draw();
+    };
     // 跟「個案清單」搜尋框同樣的問題：每次輸入都整個重畫表格（含搜尋框本身），框本身
     // 被換掉會讓焦點、游標位置跟著消失，打字打到一半畫面重畫就會感覺「被中斷」，中文
     // 注音/拼音輸入法選字選到一半被打斷更明顯。修法同個案清單：(1) 中文組字期間
