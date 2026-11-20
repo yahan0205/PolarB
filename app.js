@@ -194,6 +194,9 @@ let me = null;            // 登入者在 staff 表的資料
 let L = null;             // 下拉選項
 const isDirector = () => me && (me.role === 'director' || me.role === 'admin');
 const isAdmin = () => me && me.role === 'admin';
+// 行政：只開放編輯個案清單的「結案箱年度」，其他主任／管理者專屬功能一律看不到、也不能動。
+const isArchiveClerk = () => me && me.role === 'clerk';
+const canEditArchiveBox = () => isDirector() || isArchiveClerk();
 
 async function loadMe() {
   const rows = await db.get('staff', { user_id: `eq.${session.user.id}`, active: 'eq.true', select: '*' });
@@ -239,7 +242,7 @@ function drawNav() {
     items.push(['#/admin', '管理', /^#\/admin/]);
   }
   $('#nav').innerHTML = items.map(([href, label, re]) => `<a href="${href}" class="${re.test(h) ? 'on' : ''}">${label}</a>`).join('');
-  $('#whoami').textContent = me ? `${me.name}${me.region ? ' · ' + me.region : ''}${isDirector() ? ' · ' + (me.role === 'admin' ? '管理者' : '主任') : ''}` : '';
+  $('#whoami').textContent = me ? `${me.name}${me.region ? ' · ' + me.region : ''}${isDirector() ? ' · ' + (me.role === 'admin' ? '管理者' : '主任') : isArchiveClerk() ? ' · 行政' : ''}` : '';
 }
 
 /* ================= 路由 ================= */
@@ -2291,7 +2294,7 @@ function archiveBoxCellHtml(c) {
   const needsArchive = c.status === '結案' && !c.archive_box_year;
   const text = c.archive_box_year ? `${c.archive_box_year}年結案箱` : (c.status === '結案' ? '未登記結案箱' : '—');
   const style = needsArchive ? 'color:var(--bad);font-weight:600' : 'color:var(--ink2)';
-  return isDirector()
+  return canEditArchiveBox()
     ? `<button type="button" class="link" data-fbox="${c.id}" style="${style}" title="${title}">${esc(text)}${needsArchive ? ' ⚠' : ''}</button>`
     : `<span class="small" style="${needsArchive ? 'color:var(--bad);font-weight:600' : 'color:var(--muted)'}" title="${title}">${esc(text)}${needsArchive ? ' ⚠' : ''}</span>`;
 }
@@ -2398,7 +2401,7 @@ function openCaseDetailModal(c, r) {
     <div class="inline-check" style="margin-top:4px">審至：<span id="cdReview" style="${reviewBehind ? 'color:var(--bad);font-weight:600' : ''}">${reviewText}${reviewBehind ? ' ⚠' : ''}</span>${c.file_reviewed_by_name ? `<span class="small muted"> （${esc(c.file_reviewed_by_name)} ${fmtTime(c.file_reviewed_at)}）</span>` : ''}
       ${isDirector() ? '<button type="button" class="link" data-freview2 style="margin-left:8px">編輯</button>' : ''}</div>
     <div class="inline-check" style="margin-top:4px">結案箱：<span id="cdArchive" style="${(c.status === '結案' && !c.archive_box_year) ? 'color:var(--bad);font-weight:600' : ''}">${c.archive_box_year ? esc(`${c.archive_box_year}年結案箱`) : (c.status === '結案' ? '未登記結案箱 ⚠' : '—')}</span>${c.archive_box_by_name ? `<span class="small muted"> （${esc(c.archive_box_by_name)} ${fmtTime(c.archive_box_at)}）</span>` : ''}
-      ${isDirector() ? '<button type="button" class="link" data-fbox2 style="margin-left:8px">編輯</button>' : ''}</div>
+      ${canEditArchiveBox() ? '<button type="button" class="link" data-fbox2 style="margin-left:8px">編輯</button>' : ''}</div>
     ${warningHtml}
     ${monthsHtml}
     <div class="acts"><button type="button" class="btn" data-no>關閉</button></div>`,
@@ -2525,7 +2528,7 @@ async function viewAdmin(tab) {
   const rows = await db.all(T.table, { order: tab === 'cg' || tab === 'staff' ? 'active.desc,code,name' : 'active.desc,sort,name' });
   const isOpt = !['cg', 'staff', 'sc'].includes(tab);
   const regionSel = (name, cur) => `<select name="${name}">${opt('', '—', cur)}${REGIONS.map((r) => opt(r, r, cur)).join('')}</select>`;
-  const roleSel = (cur) => `<select name="role">${[['supervisor', '督導'], ['director', '主任'], ['admin', '管理者']].map(([v, l]) => opt(v, l, cur)).join('')}</select>`;
+  const roleSel = (cur) => `<select name="role">${[['supervisor', '督導'], ['director', '主任'], ['admin', '管理者'], ['clerk', '行政']].map(([v, l]) => opt(v, l, cur)).join('')}</select>`;
   const head = isOpt ? '<th>名稱</th><th style="width:110px">排序</th>'
     : tab === 'sc' ? '<th style="width:110px">代碼</th><th>名稱</th><th style="width:110px">排序</th>'
       : tab === 'cg' ? '<th style="width:130px">員編</th><th>姓名</th><th style="width:130px">區域</th>' : '<th style="width:130px">員編</th><th>姓名</th><th style="width:130px">區域</th><th style="width:130px">角色</th><th>登入帳號</th>';
@@ -2542,7 +2545,7 @@ async function viewAdmin(tab) {
   $('#main').innerHTML = `
   <div class="head"><div><h1>管理</h1><div class="muted small" style="margin-top:4px">選項不刪除，不用的改成停用；停用後不會出現在下拉選單，但舊紀錄仍保留。${canDelete ? '居服員／督導如果是輸入錯誤（非離職），管理者可以直接刪除。' : ''}</div></div></div>
   <nav class="tabs" aria-label="管理項目">${Object.entries(ADMIN_TABS).map(([k, v]) => `<a href="#/admin/${k}" class="${k === tab ? 'on' : ''}">${v.label}</a>`).join('')}${isAdmin()?'<a href="#/admin/rotation">輪接</a>':''}</nav>
-  ${tab === 'staff' ? '<div class="card small" style="margin-bottom:16px;color:var(--ink2)">新增登入帳號要在 Supabase 後台建立，再把帳號連到這裡的姓名，步驟見設定說明。主任與管理者可以判定拒案、刪除紀錄、管理選項。</div>' : ''}
+  ${tab === 'staff' ? '<div class="card small" style="margin-bottom:16px;color:var(--ink2)">新增登入帳號要在 Supabase 後台建立，再把帳號連到這裡的姓名，步驟見設定說明。主任與管理者可以判定拒案、刪除紀錄、管理選項；行政僅能編輯個案清單的「結案箱年度」。</div>' : ''}
   <div class="tbox"><table class="t" style="min-width:640px">
     <thead><tr>${head}<th style="width:80px">啟用</th><th style="width:90px"></th>${canDelete ? '<th style="width:70px"></th>' : ''}</tr></thead>
     <tbody>${rows.map((r) => `<tr data-id="${r.id}">${cells(r)}<td><input type="checkbox" name="active" ${r.active ? 'checked' : ''} aria-label="啟用" style="width:20px;height:20px;accent-color:var(--accent)"></td><td><button type="button" class="btn small" data-save>儲存</button></td>${canDelete ? `<td><button type="button" class="link" style="color:var(--bad)" data-del="${r.id}">刪除</button></td>` : ''}</tr>`).join('')}
