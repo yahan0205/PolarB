@@ -189,6 +189,38 @@ const db = {
   },
 };
 
+// 管理後台「督導與帳號」的建立／重設密碼／刪除登入帳號，呼叫 admin-staff-account
+// 這個 Edge Function（它持有 service role key，前端 anon key 做不到這些操作）。
+async function callStaffAccount(action, staffId, extra) {
+  const tok = await accessToken();
+  const res = await fetch(`${BASE}/functions/v1/admin-staff-account`, {
+    method: 'POST',
+    headers: { apikey: KEY, Authorization: `Bearer ${tok}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ action, staff_id: staffId, ...(extra || {}) }),
+  });
+  const text = await res.text();
+  const data = text ? JSON.parse(text) : {};
+  if (!res.ok) throw new Error(data.error || `帳號服務錯誤（${res.status}）`);
+  return data;
+}
+
+// 建立／重設密碼都需要輸入密碼，共用這個小 modal。
+function promptPassword(title, onSubmit) {
+  modal(`<h2>${esc(title)}</h2>
+    <label class="f">密碼（至少 8 碼）<input type="text" id="acctPw" autocomplete="off"></label>
+    <p class="err-text" id="acctPwErr" hidden></p>
+    <div class="acts"><button type="button" class="btn" data-no>取消</button><button type="button" class="btn primary" data-yes>確定</button></div>`,
+  (m, close) => {
+    $('[data-no]', m).onclick = close;
+    $('[data-yes]', m).onclick = async () => {
+      const pw = $('#acctPw', m).value;
+      const er = $('#acctPwErr', m);
+      if (pw.length < 8) { er.textContent = '密碼至少需要 8 碼'; er.hidden = false; return; }
+      try { await onSubmit(pw); close(); } catch (e) { er.textContent = e.message; er.hidden = false; }
+    };
+  });
+}
+
 /* ================= 目前使用者與選項 ================= */
 let me = null;            // 登入者在 staff 表的資料
 let L = null;             // 下拉選項
@@ -2535,7 +2567,11 @@ async function viewAdmin(tab) {
   const cells = (r) => isOpt ? `<td><input type="text" name="name" value="${esc(r.name)}" aria-label="名稱"></td><td><input type="number" name="sort" value="${r.sort}" aria-label="排序"></td>`
     : tab === 'sc' ? `<td><input type="text" name="code" value="${esc(r.code || '')}" aria-label="代碼"></td><td><input type="text" name="name" value="${esc(r.name)}" aria-label="名稱"></td><td><input type="number" name="sort" value="${r.sort}" aria-label="排序"></td>`
       : tab === 'cg' ? `<td><input type="text" name="code" value="${esc(r.code || '')}" aria-label="員編"></td><td><input type="text" name="name" value="${esc(r.name)}" aria-label="姓名"></td><td>${regionSel('region', r.region)}</td>`
-        : `<td><input type="text" name="code" value="${esc(r.code || '')}" aria-label="員編"></td><td><input type="text" name="name" value="${esc(r.name)}" aria-label="姓名"></td><td>${regionSel('region', r.region)}</td><td>${roleSel(r.role)}</td><td class="small">${r.user_id ? '已連結' : '<span class="faint">未連結</span>'}</td>`;
+        : `<td><input type="text" name="code" value="${esc(r.code || '')}" aria-label="員編"></td><td><input type="text" name="name" value="${esc(r.name)}" aria-label="姓名"></td><td>${regionSel('region', r.region)}</td><td>${roleSel(r.role)}</td><td class="small">${
+            r.user_id
+              ? `已連結${isDirector() ? ` <button type="button" class="link" data-acct="reset" data-id="${r.id}">重設密碼</button>` : ''}${isAdmin() ? ` <button type="button" class="link" style="color:var(--bad)" data-acct="delete" data-id="${r.id}">刪除帳號</button>` : ''}`
+              : `<span class="faint">未連結</span>${isDirector() && r.id ? ` <button type="button" class="link" data-acct="create" data-id="${r.id}">建立帳號</button>` : ''}`
+          }</td>`;
   // 居服員／督導帳號允許管理者（僅限 admin，不含主任）直接刪除——跟其他選項類表格
   // （轉介單位、未成案原因…）不一樣，那些刻意只能停用不能刪除，是因為舊紀錄會引用到。
   // 但居服員／督導如果是打錯名字（不是真的離職），留著停用只會一直卡在清單裡，應該要
@@ -2545,7 +2581,7 @@ async function viewAdmin(tab) {
   $('#main').innerHTML = `
   <div class="head"><div><h1>管理</h1><div class="muted small" style="margin-top:4px">選項不刪除，不用的改成停用；停用後不會出現在下拉選單，但舊紀錄仍保留。${canDelete ? '居服員／督導如果是輸入錯誤（非離職），管理者可以直接刪除。' : ''}</div></div></div>
   <nav class="tabs" aria-label="管理項目">${Object.entries(ADMIN_TABS).map(([k, v]) => `<a href="#/admin/${k}" class="${k === tab ? 'on' : ''}">${v.label}</a>`).join('')}${isAdmin()?'<a href="#/admin/rotation">輪接</a>':''}</nav>
-  ${tab === 'staff' ? '<div class="card small" style="margin-bottom:16px;color:var(--ink2)">新增登入帳號要在 Supabase 後台建立，再把帳號連到這裡的姓名，步驟見設定說明。主任與管理者可以判定拒案、刪除紀錄、管理選項；行政僅能編輯個案清單的「結案箱年度」。</div>' : ''}
+  ${tab === 'staff' ? '<div class="card small" style="margin-bottom:16px;color:var(--ink2)">先新增人員資料並填好員編、儲存後，再用「建立帳號」設定密碼即可（登入帳號＝員編）。主任與管理者可以判定拒案、刪除紀錄、管理選項；行政僅能編輯個案清單的「結案箱年度」。</div>' : ''}
   <div class="tbox"><table class="t" style="min-width:640px">
     <thead><tr>${head}<th style="width:80px">啟用</th><th style="width:90px"></th>${canDelete ? '<th style="width:70px"></th>' : ''}</tr></thead>
     <tbody>${rows.map((r) => `<tr data-id="${r.id}">${cells(r)}<td><input type="checkbox" name="active" ${r.active ? 'checked' : ''} aria-label="啟用" style="width:20px;height:20px;accent-color:var(--accent)"></td><td><button type="button" class="btn small" data-save>儲存</button></td>${canDelete ? `<td><button type="button" class="link" style="color:var(--bad)" data-del="${r.id}">刪除</button></td>` : ''}</tr>`).join('')}
@@ -2577,6 +2613,28 @@ async function viewAdmin(tab) {
     if (!ok) return;
     try { await db.remove(T.table, Number(btn.dataset.del)); await loadLookups(); toast('已刪除'); render(); }
     catch (e) { toast(/foreign key|violates/.test(e.message) ? '這個人已經有媒合紀錄或問案等資料引用，無法刪除，請改成停用' : e.message, true); }
+  }));
+  if (tab === 'staff') $$('[data-acct]').forEach((btn) => (btn.onclick = async () => {
+    const staffId = Number(btn.dataset.id);
+    const tr = btn.closest('tr');
+    const name = $('[name=name]', tr).value.trim();
+    const act = btn.dataset.acct;
+    if (act === 'create') {
+      promptPassword(`建立「${name}」的登入帳號`, async (pw) => {
+        const r = await callStaffAccount('create', staffId, { password: pw });
+        toast(`已建立帳號（${r.email}）`); render();
+      });
+    } else if (act === 'reset') {
+      promptPassword(`重設「${name}」的密碼`, async (pw) => {
+        await callStaffAccount('reset_password', staffId, { password: pw });
+        toast('已重設密碼');
+      });
+    } else if (act === 'delete') {
+      const ok = await confirmBox(`確定要刪除「${name}」的登入帳號嗎？刪除後這個人需要重新建立帳號才能登入。`, '刪除帳號', true);
+      if (!ok) return;
+      try { await callStaffAccount('delete', staffId); toast('已刪除帳號'); render(); }
+      catch (e) { toast(e.message, true); }
+    }
   }));
   if (tab === 'units') await drawUnitAbbrSection($('#ua-extra'));
 }
