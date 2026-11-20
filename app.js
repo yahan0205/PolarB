@@ -2571,14 +2571,21 @@ async function drawUnitAbbrSection(box) {
 // 是不是自己＝主管交辦 vs 自己建立。範本（is_monthly=true）本身不是任務，不進
 // 四象限，另外收在「每月範本設定」區塊管理。見 sql/22_todos.sql 的完整設計說明。
 const todoRpc = (name, args) => rest('POST', `rpc/${name}`, { body: args || {} });
-let todoState = { showTemplates: false };
+let todoState = { showTemplates: false, viewStaffId: null };
 
 async function viewTodos() {
+  // 管理者/主任可以切換「檢視某位督導」，看他身上被指派的所有待辦事項（不限
+  // 是誰建立的）；一般督導看不到這個切換，只能看自己相關的（RLS 本來就擋住了，
+  // 這裡只是不顯示切換選單，不是另一層安全機制）。
+  const viewOptions = isDirector()
+    ? `<label class="inline-check">檢視 <select id="todoViewStaff">${opt('', '我自己', todoState.viewStaffId)}${L.staff.filter((s) => s.active && s.role !== 'clerk').map((s) => opt(s.id, `${s.name}${s.region ? `（${s.region}）` : ''}`, todoState.viewStaffId)).join('')}</select></label>`
+    : '';
   $('#main').innerHTML = `
-  <div class="head"><div><h1>待辦事項</h1><div class="muted small" style="margin-top:4px">每月交辦與臨時待辦，主管與督導可以互相指派，只看得到自己建立或被指派的項目。</div></div>
-    <div class="right"><button type="button" class="btn primary" id="todoNew">＋ 新增待辦事項</button></div></div>
+  <div class="head"><div><h1>待辦事項</h1><div class="muted small" style="margin-top:4px">${todoState.viewStaffId ? `正在檢視 ${esc(L.staffById[todoState.viewStaffId]?.name || '')} 的待辦事項（他建立的或被指派給他的）。` : '每月交辦與臨時待辦，主管與督導可以互相指派，只看得到自己建立或被指派的項目。'}</div></div>
+    <div class="right">${viewOptions}<button type="button" class="btn primary" id="todoNew">＋ 新增待辦事項</button></div></div>
   <div id="todo-body"><p class="muted">載入中…</p></div>`;
   $('#todoNew').onclick = () => openTodoEditor(null, [], () => viewTodos());
+  $('#todoViewStaff')?.addEventListener('change', (e) => { todoState.viewStaffId = e.target.value ? Number(e.target.value) : null; viewTodos(); });
   const box = $('#todo-body');
   // 每次打開頁面先確保這個月該產生的每月任務都產生了，任何人打開都可以觸發，
   // 用資料庫那邊的 unique index 擋重複，併發也安全，失敗不擋顯示。
@@ -2603,13 +2610,20 @@ async function viewTodos() {
   const templates = todos.filter((t) => t.is_monthly);
   const actionable = todos.filter((t) => !t.is_monthly);
   const canVisit = (t) => isDirector() || t.created_by_staff_id === me.id || (assigneesByTodo[t.id] || []).includes(me.id);
+  // 管理者選了「檢視某位督導」時，viewerId 換成那位督導，四象限的分類基準
+  // （誰建立的）跟著換；同時只留下「跟那個人有關」的（他建立的，或指派給他的），
+  // 不然會看到一堆完全不相干的任務。
+  const viewerId = todoState.viewStaffId || me.id;
+  const viewingOther = Boolean(todoState.viewStaffId);
+  const viewerName = viewingOther ? (L.staffById[viewerId]?.name || '未知') : null;
+  const relevantToViewer = (t) => t.created_by_staff_id === viewerId || (assigneesByTodo[t.id] || []).includes(viewerId);
   const quadrant = (fromOthers, monthly) => actionable.filter((t) =>
-    Boolean(t.source_template_id) === monthly && (t.created_by_staff_id !== me.id) === fromOthers && canVisit(t));
+    Boolean(t.source_template_id) === monthly && (t.created_by_staff_id !== viewerId) === fromOthers && canVisit(t) && relevantToViewer(t));
   const quads = [
-    ['每月交辦（主管交辦）', quadrant(true, true)],
-    ['每月交辦（自己建立）', quadrant(false, true)],
-    ['臨時待辦（主管交辦）', quadrant(true, false)],
-    ['臨時待辦（自己建立）', quadrant(false, false)],
+    [`每月交辦（${viewingOther ? '別人交辦' : '主管交辦'}）`, quadrant(true, true)],
+    [`每月交辦（${viewingOther ? `${esc(viewerName)}建立` : '自己建立'}）`, quadrant(false, true)],
+    [`臨時待辦（${viewingOther ? '別人交辦' : '主管交辦'}）`, quadrant(true, false)],
+    [`臨時待辦（${viewingOther ? `${esc(viewerName)}建立` : '自己建立'}）`, quadrant(false, false)],
   ];
 
   const renderRow = (t) => {
