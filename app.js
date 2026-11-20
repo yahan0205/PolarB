@@ -268,9 +268,10 @@ async function refreshJudgeCount() {
 
 function drawNav() {
   const h = location.hash || '#/';
-  const items = [['#/', '問案', /^#\/($|i\/|new)/], ['#/cases', '個案清單', /^#\/cases/], ['#/report', '派案紀錄', /^#\/report/], ['#/stats', '統計', /^#\/stats/], ['#/casecheck', '個案比對', /^#\/casecheck/]];
+  const items = [['#/', '問案', /^#\/($|i\/|new)/], ['#/cases', '個案清單', /^#\/cases/], ['#/report', '派案紀錄', /^#\/report/], ['#/stats', '統計', /^#\/stats/], ['#/visitaudit', '家電訪稽核', /^#\/visitaudit/]];
   if (isDirector()) {
     items.push(['#/judge', `拒案判定${pendingJudge ? `<span class="badge-n">${pendingJudge}</span>` : ''}`, /^#\/judge/]);
+    items.push(['#/synclog', '同步紀錄', /^#\/synclog/]);
     items.push(['#/admin', '管理', /^#\/admin/]);
   }
   $('#nav').innerHTML = items.map(([href, label, re]) => `<a href="${href}" class="${re.test(h) ? 'on' : ''}">${label}</a>`).join('');
@@ -302,7 +303,8 @@ async function render() {
     else if ((m = h.match(/^#\/i\/(\d+)\/edit(?:\?status=(.+))?$/))) await viewForm(Number(m[1]), m[2] ? decodeURIComponent(m[2]) : null);
     else if ((m = h.match(/^#\/i\/(\d+)$/))) await viewDetail(Number(m[1]));
     else if (h === '#/judge' && isDirector()) await viewJudge();
-    else if (h === '#/casecheck') await viewCaseCheck();
+    else if (h === '#/synclog' && isDirector()) await viewSyncLog();
+    else if (h === '#/visitaudit') await viewVisitAudit();
     else if (h === '#/cases') await viewCases();
     else if (h === '#/report') await viewReport();
     else if (h === '#/stats') await viewStats();
@@ -670,7 +672,7 @@ async function viewForm(id, presetStatus) {
       ${!id ? `<div class="spanall card" id="rotation-board" hidden><h2 class="small" style="margin:0 0 8px">輪接現況（僅供查看）</h2><div id="rotation-board-body" class="small mono"></div></div>` : ''}
       <label class="f" data-for="成案">照會日期 <span class="req">*</span><input type="date" name="referral_date" value="${esc(r.referral_date || '')}"></label>
       <label class="f" data-for="成案">簽約日 <span class="req">*</span><input type="date" name="contract_date" value="${esc(r.contract_date || '')}"></label>
-      <label class="f" data-for="成案">仁寶案號<input type="text" name="case_no" value="${esc(r.case_no || '')}" placeholder="選填，之後也能用個案比對批次帶入"></label>
+      <label class="f" data-for="成案">仁寶案號<input type="text" name="case_no" value="${esc(r.case_no || '')}" placeholder="選填"></label>
       <label class="f" data-for="未成案">未成案原因 <span class="req">*</span><select name="nc_reason_id">${opt('', '請選擇', r.nc_reason_id)}${activeOr(L.nc, r.nc_reason_id).map((x) => opt(x.id, x.name, r.nc_reason_id)).join('')}</select></label>
       <label class="f span2" data-for="未成案">未成案說明<input type="text" name="nc_note" value="${esc(r.nc_note || '')}"></label>
       <label class="f spanall">特殊事項<textarea name="remarks" style="min-height:60px">${esc(r.remarks || '')}</textarea></label>
@@ -1270,22 +1272,6 @@ const RK_COLS = {
 };
 // 選填欄位：缺少不擋匯入（優雅降級），只在預覽畫面提醒。
 const RK_OPTIONAL_COLS = { pause_date: '暫停日期', end_date: '結案日期' };
-const normName = (s) => String(s || '').replace(/[\s　]/g, '').replace(/[（(].*?[）)]/g, '').replace(/[、,，.。·\-－_]/g, '').trim();
-const normAddr = (s) => String(s || '').replace(/[\s　]/g, '').replace(/臺/g, '台').replace(/[,，、.。]/g, '')
-  .replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xFEE0)).trim();
-function bigrams(s) {
-  const out = new Set();
-  for (let i = 0; i < s.length - 1; i++) out.add(s.slice(i, i + 2));
-  if (!out.size && s.length) out.add(s);
-  return out;
-}
-function diceScore(a, b) {
-  if (!a || !b) return 0;
-  const A = bigrams(a), B = bigrams(b);
-  if (!A.size || !B.size) return a === b ? 1 : 0;
-  let inter = 0; for (const g of A) if (B.has(g)) inter++;
-  return (2 * inter) / (A.size + B.size);
-}
 function toISODate(v) {
   if (v instanceof Date && !isNaN(v)) return `${v.getFullYear()}-${String(v.getMonth() + 1).padStart(2, '0')}-${String(v.getDate()).padStart(2, '0')}`;
   if (typeof v === 'string') { const m = v.match(/(\d{4})[/\-.](\d{1,2})[/\-.](\d{1,2})/); if (m) return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`; }
@@ -1378,72 +1364,6 @@ async function parseVisitLogFile(file) {
   const usable = picked.filter((r) => r.national_id && r.visit_date);
   const monthsCovered = [...new Set(usable.map((r) => r.visit_date.slice(0, 7)))].sort();
   return { total: picked.length, usable, skipped: picked.length - usable.length, missingHeaders, monthsCovered };
-}
-
-function computeComparison(inquiries, rkRows) {
-  const byCaseNo = new Map(rkRows.map((r) => [r.case_no, r]));
-  const confirmed = [], suggested = [], missing = [], needsReview = [];
-  const candidates = inquiries.filter((i) => i.status === '成案');
-  const unlinked = candidates.filter((i) => !i.case_no);
-  const linked = candidates.filter((i) => i.case_no);
-
-  for (const inq of linked) {
-    const rk = byCaseNo.get(inq.case_no);
-    if (rk) confirmed.push({ inq, rk });
-    else needsReview.push({ inq, reason: '案號在最新匯入中找不到（可能打錯或案號已變更）' });
-  }
-
-  for (const inq of unlinked) {
-    let best = null, bestScore = 0;
-    const nName = normName(inq.client_name), nAddr = normAddr(inq.address);
-    for (const rk of rkRows) {
-      const nameScore = diceScore(nName, normName(rk.name));
-      if (nameScore < 0.5) continue;
-      const addrScore = diceScore(nAddr, normAddr(`${rk.city || ''}${rk.district || ''}${rk.address || ''}`));
-      const score = nameScore * 0.6 + addrScore * 0.4;
-      if (score > bestScore) { bestScore = score; best = rk; }
-    }
-    if (best && bestScore >= 0.55) suggested.push({ inq, rk: best, score: bestScore, high: bestScore >= 0.8 });
-  }
-  const byRkCaseNo = new Map();
-  suggested.forEach((s) => byRkCaseNo.set(s.rk.case_no, (byRkCaseNo.get(s.rk.case_no) || 0) + 1));
-  suggested.forEach((s) => { s.ambiguous = byRkCaseNo.get(s.rk.case_no) > 1; });
-
-  const linkedCaseNos = new Set(linked.map((i) => i.case_no));
-  const suggestedCaseNos = new Set(suggested.map((s) => s.rk.case_no));
-  // 「疑似漏填」的用意是抓「忘記建立問案」的個案。但上面比對 suggested/linked 時只看
-  // status==='成案' 的問案（candidates），如果某個個案在問案系統裡其實已經有建立問案、
-  // 只是還在「問案中」還沒標成成案（例如已經有居服員接受、等正式轉案），就會被漏掉、
-  // 誤判成「忘記建立問案」——明明問案確實存在，只是流程還沒走完。這裡額外用「不限狀態」
-  // 的全部問案再比對一次姓名＋地址，只要有任何問案（不管問案中/成案/未成案）相符，就不
-  // 算漏填，避免這種假警報。
-  const anyInquiryMatchCaseNos = new Set();
-  for (const rk of rkRows) {
-    if (!['服務中', '暫停'].includes(rk.status)) continue;
-    if (linkedCaseNos.has(rk.case_no) || suggestedCaseNos.has(rk.case_no)) continue;
-    const nAddr = normAddr(`${rk.city || ''}${rk.district || ''}${rk.address || ''}`);
-    const nName = normName(rk.name);
-    const hasAnyMatch = inquiries.some((inq) => {
-      const nameScore = diceScore(nName, normName(inq.client_name));
-      if (nameScore < 0.5) return false;
-      const addrScore = diceScore(nAddr, normAddr(inq.address));
-      return (nameScore * 0.6 + addrScore * 0.4) >= 0.55;
-    });
-    if (hasAnyMatch) anyInquiryMatchCaseNos.add(rk.case_no);
-  }
-  for (const rk of rkRows) {
-    if (!['服務中', '暫停'].includes(rk.status)) continue;
-    if (linkedCaseNos.has(rk.case_no) || suggestedCaseNos.has(rk.case_no) || anyInquiryMatchCaseNos.has(rk.case_no)) continue;
-    missing.push(rk);
-  }
-  return { confirmed, suggested, missing, needsReview };
-}
-
-async function confirmMatches(pairs, onProgress) {
-  for (let i = 0; i < pairs.length; i++) {
-    await db.update('inquiries', pairs[i].inquiryId, { case_no: pairs[i].caseNo });
-    onProgress?.(i + 1, pairs.length);
-  }
 }
 
 /* ---- 家電訪稽核：月份小工具、匯入批次的「同月取最新一批」解析、稽核演算法 ---- */
@@ -1579,161 +1499,27 @@ function auditCases(casesByNid, records, asOfMonth) {
   return { results, logMinMonth, logMaxMonth, excludedCount };
 }
 
-let caseCheckState = { tab: 'upload', visitsSub: 'list' };
 let visitListState = { owner: '全部', sortDir: 'asc' };
-async function viewCaseCheck() {
+
+/* ================= 家電訪稽核（原本是「個案比對」裡的一個頁籤，拆成獨立頁面；
+   「個案比對」其餘功能——手動上傳個案總表比對問案、疑似漏填/案號待確認——已經
+   被每日自動同步＋「同步紀錄」頁面取代，見 sync/ 底下的自動化同步專案，故撤除，
+   不用兩套機制同時維護。手動補上傳個案總表的功能仍保留在「個案清單」頁面。） ================= */
+let visitAuditState = { sub: 'list' };
+async function viewVisitAudit() {
   $('#main').innerHTML = `
-  <div class="head"><div><h1>個案比對</h1><div class="muted small" style="margin-top:4px">每月匯入仁寶系統的個案總表，跟博樂系統的問案資料交叉比對，避免漏填。</div></div></div>
+  <div class="head"><div><h1>家電訪稽核</h1><div class="muted small" style="margin-top:4px">比對「個案清單」主檔與仁寶系統匯入的訪視紀錄，找出該家訪/電訪卻缺漏的個案。</div></div></div>
   <div class="filters">
-    <div class="seg" role="group" aria-label="頁籤">${[['upload', '上傳匯入'], ['report', '比對結果'], ['history', '匯入紀錄'], ['visits', '家電訪稽核']].map(([k, l]) => `<button type="button" data-cctab="${k}" class="${caseCheckState.tab === k ? 'on' : ''}">${l}</button>`).join('')}</div>
+    <div class="seg" role="group" aria-label="家電訪子頁籤">${[['list', '缺漏清單'], ['stats', '統計'], ['import', '匯入與批次']].map(([k, l]) => `<button type="button" data-ccvsub="${k}" class="${visitAuditState.sub === k ? 'on' : ''}">${l}</button>`).join('')}</div>
   </div>
-  <div id="cc-body"><p class="muted">載入中…</p></div>`;
-  $$('[data-cctab]').forEach((b) => (b.onclick = () => { caseCheckState.tab = b.dataset.cctab; viewCaseCheck(); }));
-  const box = $('#cc-body');
-  if (caseCheckState.tab === 'upload') drawCcUpload(box);
-  else if (caseCheckState.tab === 'report') await drawCcReport(box);
-  else if (caseCheckState.tab === 'history') await drawCcHistory(box);
-  else await drawCcVisits(box);
+  <div id="cc-visits-body"><p class="muted">載入中…</p></div>`;
+  $$('[data-ccvsub]').forEach((b) => (b.onclick = () => { visitAuditState.sub = b.dataset.ccvsub; drawCcVisits($('#cc-visits-body')); }));
+  await drawCcVisits($('#cc-visits-body'));
 }
 
-function drawCcUpload(box) {
-  box.innerHTML = `<div class="card stack">
-    <label class="f">匯入標籤（例：115年10月）<input type="text" id="ccPeriod" placeholder="115年10月"></label>
-    <label class="f">選擇仁寶系統匯出的 Excel 檔<input type="file" id="ccFile" accept=".xlsx,.xls"></label>
-    <p class="small muted" style="margin:0">系統只會讀取案號、姓名、身分證字號、主責督導、居服員、狀態、地址、服務起始日等必要欄位做比對用，其餘欄位會整批保留但不特別處理。身分證字號在職人員都看得到，是為了同姓名個案可以辨識，請勿外流。</p>
-    <p class="err-text" id="ccerr" hidden></p>
-    <div id="ccPreview"></div>
-    <div style="display:flex;gap:8px;justify-content:flex-end">
-      <button type="button" class="btn" id="ccAnalyze">分析檔案</button>
-      <button type="button" class="btn primary" id="ccImport" hidden>確認匯入</button>
-    </div>
-  </div>`;
-  let parsed = null;
-  $('#ccAnalyze').onclick = async () => {
-    const f = $('#ccFile').files[0];
-    const er = $('#ccerr'); er.hidden = true; $('#ccImport').hidden = true;
-    if (!f) { er.textContent = '請先選擇檔案'; er.hidden = false; return; }
-    const btn = $('#ccAnalyze'); btn.disabled = true;
-    try {
-      parsed = await parseRkFile(f);
-      if (parsed.missingHeaders.length) {
-        er.textContent = `找不到欄位：${parsed.missingHeaders.join('、')}，請確認匯出格式是否正確`;
-        er.hidden = false;
-      } else {
-        $('#ccPreview').innerHTML = `<div class="card small" style="margin-top:8px">
-          共 ${parsed.total} 筆，可匯入 ${parsed.usable.length} 筆，略過 ${parsed.skipped} 筆（無案號）。
-          ${parsed.missingOptionalHeaders.length ? `<p class="small" style="color:var(--warn);margin:6px 0 0">此次匯出沒有「${parsed.missingOptionalHeaders.join('、')}」欄位，相關判斷（例如結案後是否停止稽核）會優雅降級，不會擋匯入。</p>` : ''}
-          <div class="tbox" style="margin-top:8px"><table class="t"><thead><tr><th>案號</th><th>姓名</th><th>狀態</th><th>主責督導</th></tr></thead>
-          <tbody>${parsed.usable.slice(0, 15).map((r) => `<tr><td>${esc(r.case_no)}</td><td>${esc(r.name)}</td><td>${esc(r.status)}</td><td>${esc(r.lead_supervisor)}</td></tr>`).join('')}</tbody></table></div>
-          ${parsed.usable.length > 15 ? '<p class="small muted" style="margin:6px 0 0">僅預覽前 15 筆</p>' : ''}
-        </div>`;
-        $('#ccImport').hidden = false;
-      }
-    } catch (e) { er.textContent = e.message; er.hidden = false; }
-    btn.disabled = false;
-  };
-  $('#ccImport').onclick = async () => {
-    const period = $('#ccPeriod').value.trim();
-    const er = $('#ccerr'); er.hidden = true;
-    if (!parsed) return;
-    if (!period) { er.textContent = '請填寫匯入標籤'; er.hidden = false; return; }
-    const btn = $('#ccImport'); btn.disabled = true;
-    try {
-      const batch = await db.insert('rk_imports', {
-        imported_by_name: me.name, file_name: $('#ccFile').files[0]?.name || null,
-        period, row_count: parsed.usable.length, skipped_count: parsed.skipped,
-      });
-      const chunkSize = 400;
-      for (let i = 0; i < parsed.usable.length; i += chunkSize) {
-        const chunk = parsed.usable.slice(i, i + chunkSize).map((r) => ({ ...r, import_id: batch.id }));
-        await db.insertMany('rk_cases', chunk);
-        toast(`已匯入 ${Math.min(i + chunkSize, parsed.usable.length)} / ${parsed.usable.length} 筆`);
-      }
-      toast('匯入完成');
-      const uploadedFile = $('#ccFile').files[0];
-      await offerRosterSync(uploadedFile, () => { caseCheckState.tab = 'report'; viewCaseCheck(); });
-    } catch (e) { er.textContent = e.message; er.hidden = false; btn.disabled = false; }
-  };
-}
-
-async function drawCcReport(box) {
-  box.innerHTML = '<p class="muted">載入中…</p>';
-  const [inqs, imports] = await Promise.all([
-    db.all('inquiries', { select: 'id,code,client_name,address,region,status,case_no', status: 'eq.成案' }),
-    db.all('rk_imports', { order: 'imported_at.desc', limit: 1 }),
-  ]);
-  if (!imports.length) { box.innerHTML = '<div class="card empty">還沒有匯入過仁寶系統的個案總表，請先到「上傳匯入」頁籤匯入。</div>'; return; }
-  const latest = imports[0];
-  const rkRows = await db.all('rk_cases', { import_id: `eq.${latest.id}` });
-  const cmp = computeComparison(inqs, rkRows);
-  box.innerHTML = `
-  <p class="small muted">目前比對的批次：${esc(latest.period || '')}（${fmtTime(latest.imported_at)} 由 ${esc(latest.imported_by_name || '')} 匯入，共 ${latest.row_count} 筆）</p>
-  <div class="card" style="margin:10px 0 16px"><div style="display:flex;flex-wrap:wrap;gap:16px 40px">
-    ${[['已連結', cmp.confirmed.length], ['建議配對待確認', cmp.suggested.length], ['疑似漏填', cmp.missing.length], ['案號待確認', cmp.needsReview.length]].map(([k, v]) => `<div><div class="small muted">${k}</div><div style="font-size:26px;font-weight:700;font-variant-numeric:tabular-nums">${v}</div></div>`).join('')}
-  </div></div>
-
-  <div class="card" style="margin-bottom:16px">
-    <h2>建議配對（${cmp.suggested.length}）</h2>
-    <p class="small muted" style="margin:4px 0 10px">系統用姓名與地址自動比對出的建議，勾選後按「確認所選」才會寫入問案的仁寶案號。標示「有疑義」表示同一個仁寶案號被配對到多筆問案，需要個別確認。</p>
-    ${cmp.suggested.length ? `
-    <div class="tbox"><table class="t"><thead><tr><th><input type="checkbox" id="ccSelAll"></th><th>博樂問案</th><th>仁寶個案</th><th>相似度</th><th></th></tr></thead>
-      <tbody>${cmp.suggested.map((s, i) => `<tr>
-        <td><input type="checkbox" class="ccSugCb" data-i="${i}" ${s.ambiguous ? 'disabled' : ''}></td>
-        <td><a href="#/i/${s.inq.id}">${esc(s.inq.code)}</a> ${esc(s.inq.client_name || '')}<div class="sub">${esc(s.inq.address || '')}</div></td>
-        <td>${esc(s.rk.case_no)} ${esc(s.rk.name)}<div class="sub">${esc((s.rk.city || '') + (s.rk.district || '') + (s.rk.address || ''))}</div></td>
-        <td>${Math.round(s.score * 100)}%${s.ambiguous ? ' <span class="tag">有疑義</span>' : ''}</td>
-        <td><button type="button" class="link" data-ccreject="${i}">不是同一人</button></td>
-      </tr>`).join('')}</tbody></table></div>
-    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px">
-      <button type="button" class="btn" id="ccSelHigh">勾選高信心（≥80%）</button>
-      <button type="button" class="btn primary" id="ccConfirmSel">確認所選</button>
-    </div>` : '<p class="muted small">目前沒有待確認的建議配對。</p>'}
-  </div>
-
-  <div class="card" style="margin-bottom:16px">
-    <h2>疑似漏填（${cmp.missing.length}）</h2>
-    <p class="small muted" style="margin:4px 0 10px">仁寶系統裡「服務中」或「暫停」的個案，在博樂系統完全找不到任何姓名/地址相符的問案紀錄（不管問案中、成案、未成案），可能有人忘記建立問案。若問案紀錄已存在、只是還沒標成成案，不會列在這裡。</p>
-    ${cmp.missing.length ? `<div class="tbox"><table class="t"><thead><tr><th>案號</th><th>姓名</th><th>狀態</th><th>主責督導</th><th>主責居服員</th><th>地址</th><th>服務起始</th></tr></thead>
-      <tbody>${cmp.missing.map((r) => `<tr><td>${esc(r.case_no)}</td><td>${esc(r.name)}</td><td>${esc(r.status)}</td><td>${esc(r.lead_supervisor)}</td><td>${esc(r.lead_caregiver)}</td><td>${esc((r.city || '') + (r.district || '') + (r.address || ''))}</td><td>${fmtDate(r.service_start_date)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted small">沒有發現漏填的個案。</p>'}
-  </div>
-
-  <div class="card">
-    <h2>案號待確認（${cmp.needsReview.length}）</h2>
-    <p class="small muted" style="margin:4px 0 10px">問案已經有仁寶案號，但在最新匯入的名單裡找不到，可能是案號打錯或已經異動。</p>
-    ${cmp.needsReview.length ? `<div class="tbox"><table class="t"><thead><tr><th>博樂問案</th><th>仁寶案號</th><th>原因</th></tr></thead>
-      <tbody>${cmp.needsReview.map((r) => `<tr><td><a href="#/i/${r.inq.id}">${esc(r.inq.code)}</a> ${esc(r.inq.client_name || '')}</td><td>${esc(r.inq.case_no)}</td><td class="small muted">${esc(r.reason)}</td></tr>`).join('')}</tbody></table></div>` : '<p class="muted small">沒有需要確認的案號。</p>'}
-  </div>`;
-
-  $('#ccSelAll')?.addEventListener('change', (e) => { $$('.ccSugCb:not(:disabled)').forEach((cb) => (cb.checked = e.target.checked)); });
-  $('#ccSelHigh')?.addEventListener('click', () => { $$('.ccSugCb').forEach((cb) => { const s = cmp.suggested[Number(cb.dataset.i)]; cb.checked = !cb.disabled && s.high; }); });
-  $$('[data-ccreject]').forEach((b) => (b.onclick = () => { b.closest('tr').remove(); }));
-  $('#ccConfirmSel')?.addEventListener('click', async () => {
-    const chosen = $$('.ccSugCb:checked').map((cb) => cmp.suggested[Number(cb.dataset.i)]);
-    if (!chosen.length) { toast('請先勾選要確認的配對', true); return; }
-    if (!(await confirmBox(`確定要寫入 ${chosen.length} 筆仁寶案號連結嗎？`))) return;
-    const pairs = chosen.map((s) => ({ inquiryId: s.inq.id, caseNo: s.rk.case_no }));
-    try {
-      await confirmMatches(pairs, (done, total) => { if (done % 20 === 0 || done === total) toast(`已連結 ${done} / ${total} 筆`); });
-      toast('已完成'); viewCaseCheck();
-    } catch (e) { toast(e.message, true); }
-  });
-}
-
-async function drawCcHistory(box) {
-  box.innerHTML = '<p class="muted">載入中…</p>';
-  const rows = await db.all('rk_imports', { order: 'imported_at.desc' });
-  box.innerHTML = `<div class="tbox"><table class="t"><thead><tr><th>匯入時間</th><th>標籤</th><th>匯入者</th><th>檔名</th><th class="num">筆數</th><th class="num">略過</th><th></th></tr></thead>
-    <tbody>${rows.map((r) => `<tr><td>${fmtTime(r.imported_at)}</td><td>${esc(r.period || '')}</td><td>${esc(r.imported_by_name || '')}</td><td class="small muted">${esc(r.file_name || '')}</td><td class="num">${r.row_count}</td><td class="num">${r.skipped_count}</td><td>${isDirector() ? `<button type="button" class="link" style="color:var(--bad)" data-ccdel="${r.id}">刪除</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="7" class="empty">還沒有匯入紀錄</td></tr>'}</tbody></table></div>`;
-  $$('[data-ccdel]').forEach((b) => (b.onclick = async () => {
-    if (!(await confirmBox('確定要刪除這批匯入紀錄嗎？底下的個案資料也會一起刪除，無法復原。', '刪除', true))) return;
-    try { await db.remove('rk_imports', Number(b.dataset.ccdel)); toast('已刪除'); viewCaseCheck(); } catch (e) { toast(e.message, true); }
-  }));
-}
-
-/* ================= 家電訪稽核 ================= */
-// 稽核的個案名單改用「個案清單」（case_roster，常態恆存的主檔）而不是「個案比對」
-// 每月上傳的 rk_cases 快照——case_roster 本來就是持續維護的最新名單，不需要使用者
-// 每次都另外在「個案比對」頁籤重傳一次個案總表才能用家電訪稽核。
+// 稽核的個案名單改用「個案清單」（case_roster，常態恆存的主檔），不是每月快照——
+// case_roster 現在由每日自動同步（sync/scripts/daily-sync-case-summary.js）持續
+// 維護最新名單，不需要使用者再手動上傳。
 async function loadVisitAudit() {
   const [roster, visitBatches] = await Promise.all([
     db.all('case_roster', {}),
@@ -1753,19 +1539,13 @@ async function loadVisitAudit() {
 }
 
 async function drawCcVisits(box) {
-  box.innerHTML = `
-  <div class="filters">
-    <div class="seg" role="group" aria-label="家電訪子頁籤">${[['list', '缺漏清單'], ['stats', '統計'], ['import', '匯入與批次']].map(([k, l]) => `<button type="button" data-ccvsub="${k}" class="${caseCheckState.visitsSub === k ? 'on' : ''}">${l}</button>`).join('')}</div>
-  </div>
-  <div id="cc-visits-body"><p class="muted">載入中…</p></div>`;
-  $$('[data-ccvsub]').forEach((b) => (b.onclick = () => { caseCheckState.visitsSub = b.dataset.ccvsub; drawCcVisits(box); }));
-  const sub = $('#cc-visits-body');
-  if (caseCheckState.visitsSub === 'import') { drawVisitImport(sub); return; }
-  sub.innerHTML = '<p class="muted">載入中…</p>';
+  if (visitAuditState.sub === 'import') { drawVisitImport(box); return; }
+  box.innerHTML = '<p class="muted">載入中…</p>';
   const audit = await loadVisitAudit();
-  if (!audit) { sub.innerHTML = '<div class="card empty">「個案清單」還沒有資料，或還沒有匯入過訪視紀錄總表。請先到「個案清單」頁面建立個案主檔，並在這裡的「匯入與批次」頁籤匯入訪視紀錄。</div>'; return; }
-  if (!audit.results.size && !audit.logMinMonth) { sub.innerHTML = '<div class="card empty">目前還沒有任何有效的訪視紀錄。</div>'; return; }
-  if (caseCheckState.visitsSub === 'stats') drawVisitStats(sub, audit);
+  if (!audit) { box.innerHTML = '<div class="card empty">「個案清單」還沒有資料，或還沒有匯入過訪視紀錄總表。請先到「個案清單」頁面建立個案主檔，並在這裡的「匯入與批次」頁籤匯入訪視紀錄。</div>'; return; }
+  if (!audit.results.size && !audit.logMinMonth) { box.innerHTML = '<div class="card empty">目前還沒有任何有效的訪視紀錄。</div>'; return; }
+  const sub = box;
+  if (visitAuditState.sub === 'stats') drawVisitStats(sub, audit);
   else await drawVisitList(sub, audit);
 }
 
@@ -1929,7 +1709,7 @@ function drawVisitImport(box) {
           await db.insertMany('rk_visits', chunk);
           toast(`已匯入 ${Math.min(i + chunkSize, parsed.usable.length)} / ${parsed.usable.length} 筆`);
         }
-        toast('匯入完成'); caseCheckState.visitsSub = 'list'; viewCaseCheck();
+        toast('匯入完成'); visitAuditState.sub = 'list'; viewVisitAudit();
       } catch (e) { er.textContent = e.message; er.hidden = false; btn.disabled = false; }
     };
   }
@@ -1942,7 +1722,7 @@ async function drawVisitImportHistory(box) {
     <tbody>${rows.map((r) => `<tr><td>${fmtTime(r.imported_at)}</td><td>${esc(r.period || '')}</td><td>${esc(r.imported_by_name || '')}</td><td class="small muted">${esc(r.file_name || '')}</td><td class="small">${esc((r.months_covered || []).map(fmtMonth).join('、'))}</td><td class="num">${r.row_count}</td><td class="num">${r.skipped_count}</td><td>${isDirector() ? `<button type="button" class="link" style="color:var(--bad)" data-vdel="${r.id}">刪除</button>` : ''}</td></tr>`).join('') || '<tr><td colspan="8" class="empty">還沒有匯入紀錄</td></tr>'}</tbody></table></div>`;
   $$('[data-vdel]').forEach((b) => (b.onclick = async () => {
     if (!(await confirmBox('確定要刪除這批訪視紀錄嗎？無法復原。', '刪除', true))) return;
-    try { await db.remove('rk_visit_imports', Number(b.dataset.vdel)); toast('已刪除'); viewCaseCheck(); } catch (e) { toast(e.message, true); }
+    try { await db.remove('rk_visit_imports', Number(b.dataset.vdel)); toast('已刪除'); viewVisitAudit(); } catch (e) { toast(e.message, true); }
   }));
 }
 
@@ -2000,7 +1780,7 @@ async function loadCaseAudit(base) {
 
 async function viewCases() {
   $('#main').innerHTML = `
-  <div class="head"><div><h1>個案清單</h1><div class="muted small" style="margin-top:4px">全系統個案主檔，跟「個案比對」每月匯入的快照分開，是持續維護的單一份資料。</div></div></div>
+  <div class="head"><div><h1>個案清單</h1><div class="muted small" style="margin-top:4px">全系統個案主檔，每日由仁寶系統自動同步更新（見「同步紀錄」頁面），是持續維護的單一份資料。</div></div></div>
   <div id="cases-body"><p class="muted">載入中…</p></div>`;
   const box = $('#cases-body');
   let base;
@@ -2142,7 +1922,7 @@ function drawCaseRosterTable(box, data) {
         <tbody>${bySupervisor.map((s) => `<tr${s.owner === me.name ? ' style="background:var(--accent-l)"' : ''}><td>${esc(s.owner)}</td><td class="num">${s.newThisMonth}</td><td class="num">${s.total}</td><td class="num">${auditLoading ? '…' : s.homeOverdue}</td><td class="num">${auditLoading ? '…' : s.phoneMissing}</td><td class="num">${s.fileMissing}</td></tr>`).join('') || '<tr><td colspan="6" class="empty">無資料</td></tr>'}</tbody></table></div>`}
     </div>`}
     ${!roster.length ? '' : (auditLoading ? '<p class="small" style="color:var(--accent-d)">⏳ 缺漏稽核結果背景計算中…「最近一次家訪／電訪」等欄位會在算完後自動補上，不影響先搜尋、瀏覽個案清單。</p>'
-      : !audit.logMinMonth ? '<p class="small muted">還沒有匯入過訪視紀錄總表，「最近一次家訪／電訪」欄位暫時顯示尚無資料。到「個案比對」頁面的「家電訪稽核」頁籤可以匯入。</p>'
+      : !audit.logMinMonth ? '<p class="small muted">還沒有匯入過訪視紀錄總表，「最近一次家訪／電訪」欄位暫時顯示尚無資料。到「家電訪稽核」頁面的「匯入與批次」頁籤可以匯入。</p>'
       : `<p class="small muted">訪視紀錄自 <strong>${fmtMonth(audit.logMinMonth)}</strong> 起開始匯入；此前月份不列入缺漏統計。</p>`)}
     <div class="card filters" style="margin:10px 0 16px">
       <label class="inline-check">主責督導 <select id="rfOwner">${opt('全部', '全部', caseRosterState.owner)}${owners.map((o) => opt(o, o, caseRosterState.owner)).join('')}</select></label>
@@ -2506,8 +2286,7 @@ function drawCaseRosterImport(box, roster) {
   };
 }
 
-// 分批 upsert 進「個案清單」主檔；供「個案清單」頁面自己的匯入，以及下面
-// 「個案比對」上傳完後順手同步用（兩處共用同一套邏輯，不要各寫一份）。
+// 分批 upsert 進「個案清單」主檔；供「個案清單」頁面自己的匯入使用。
 async function upsertCaseRosterRows(usableRows, onProgress) {
   const now = new Date().toISOString();
   const rows = usableRows.map((r) => ({ ...r, last_synced_at: now, last_synced_by_name: me.name }));
@@ -2519,31 +2298,100 @@ async function upsertCaseRosterRows(usableRows, onProgress) {
   return rows.length;
 }
 
-// 「個案比對」每月上傳完後，順手問要不要用同一份檔案（已經在記憶體裡，不用使用者
-// 重選一次）同步更新「個案清單」主檔——「個案清單」是持續維護的單一份資料，跟
-// 「個案比對」每次匯入都是新快照的 rk_cases 分開，見 sql/08_case_roster.sql 的說明。
-async function offerRosterSync(file, afterDone) {
-  if (!isDirector() || !file) { afterDone?.(); return; }
-  let parsed;
-  try { parsed = await parseCaseRosterFile(file); } catch { afterDone?.(); return; }
-  if (!parsed.usable.length) { afterDone?.(); return; }
-  let existingNos;
-  try { existingNos = new Set((await db.all('case_roster', { select: 'case_no' })).map((r) => r.case_no)); }
-  catch { existingNos = new Set(); }
-  const newCount = parsed.usable.filter((r) => !existingNos.has(r.case_no)).length;
-  const updateCount = parsed.usable.length - newCount;
-  modal(`<h2>同步到「個案清單」？</h2>
-    <p class="small muted" style="margin:4px 0 0">用剛剛這份檔案比對「個案清單」（持續維護的個案主檔）：新增 ${newCount} 筆、更新 ${updateCount} 筆。只會更新基本資料，不會動到既有的「案本」勾選狀態，也不會刪除清單裡的任何個案。</p>
-    <div class="acts"><button type="button" class="btn" data-no>不用，謝謝</button><button type="button" class="btn primary" data-yes>同步</button></div>`,
-  (m, close) => {
-    $('[data-no]', m).onclick = () => { close(); afterDone?.(); };
-    $('[data-yes]', m).onclick = async () => {
-      $('[data-yes]', m).disabled = true;
-      try { await upsertCaseRosterRows(parsed.usable); toast('已同步到個案清單'); }
-      catch (e) { toast(e.message, true); }
-      close(); afterDone?.();
-    };
-  });
+/* ================= 同步紀錄（仁寶自動同步執行歷程） ================= */
+// 對應 sync_runs 資料表（sql/18_sync_runs.sql），每次排程自動同步（個案總表／
+// 督導訪視紀錄總表）都會在這裡留一筆記錄，讓主任/管理者不用跑去 Supabase
+// 後台查，直接在系統裡看得到「跑了沒、成不成功、有沒有異常」。這張表的
+// RLS 只開放主任/管理者讀取（is_director()），一般在職人員看不到，比照
+// 其他系統維運性質的功能。
+const SYNC_REPORT_TYPE_LABEL = { case_summary: '個案總表', supervisor_visit_record: '督導訪視紀錄總表' };
+const SYNC_STATUS_LABEL = { running: '執行中', success: '成功', partial_failure: '部分成功（有異常）', failed: '失敗' };
+const syncLogState = { reportType: '全部', status: '全部' };
+
+async function viewSyncLog() {
+  $('#main').innerHTML = `
+  <div class="head"><div><h1>同步紀錄</h1><div class="muted small" style="margin-top:4px">仁寶系統自動同步（個案總表／督導訪視紀錄總表）的執行歷程，每天排程跑完都會留一筆紀錄。</div></div></div>
+  <div id="synclog-body"><p class="muted">載入中…</p></div>`;
+  const box = $('#synclog-body');
+  let runs;
+  try {
+    runs = await db.all('sync_runs', { order: 'started_at.desc' });
+  } catch (e) {
+    box.innerHTML = `<div class="card"><p class="err-text">${esc(e.message)}</p></div>`;
+    return;
+  }
+
+  const totalRuns = runs.length;
+  const successCount = runs.filter((r) => r.status === 'success').length;
+  const failedCount = runs.filter((r) => r.status === 'failed').length;
+  const warningCount = runs.filter((r) => r.coverage_warning).length;
+  const lastRun = runs[0];
+
+  // 疑似漏填問案比對：個案總表每次自動同步時順便跑的比對結果（邏輯見
+  // sync/shared/case-comparison.js），取「最近一次成功的個案總表同步」那筆的
+  // 結果，因為這是快照式的比對（當下仁寶資料 vs 當下問案資料），不是累加的，
+  // 只看最新一次就好，不用把歷史每一筆都疊加起來看。
+  const latestCaseSummaryRun = runs.find((r) => r.report_type === 'case_summary' && r.status === 'success' && r.missing_inquiry_details != null);
+  const missingList = latestCaseSummaryRun?.missing_inquiry_details || [];
+  const needsReviewList = latestCaseSummaryRun?.needs_review_details || [];
+
+  const draw = () => {
+    const filtered = runs.filter((r) =>
+      (syncLogState.reportType === '全部' || SYNC_REPORT_TYPE_LABEL[r.report_type] === syncLogState.reportType)
+      && (syncLogState.status === '全部' || SYNC_STATUS_LABEL[r.status] === syncLogState.status));
+
+    box.innerHTML = `
+    <div class="card" style="margin-bottom:16px">
+      <div style="display:flex;flex-wrap:wrap;gap:16px 40px">
+        <div><div class="small muted">總執行次數</div><div style="font-size:26px;font-weight:700">${totalRuns}</div></div>
+        <div><div class="small muted">成功</div><div style="font-size:26px;font-weight:700;color:var(--ok)">${successCount}</div></div>
+        <div><div class="small muted">失敗</div><div style="font-size:26px;font-weight:700;color:${failedCount ? 'var(--bad)' : 'var(--ink2)'}">${failedCount}</div></div>
+        <div><div class="small muted">涵蓋異常警告</div><div style="font-size:26px;font-weight:700;color:${warningCount ? 'var(--warn)' : 'var(--ink2)'}">${warningCount}</div></div>
+        <div><div class="small muted">最近一次執行</div><div style="font-size:16px;font-weight:600;margin-top:4px">${lastRun ? `${fmtTime(lastRun.started_at)}　${esc(SYNC_REPORT_TYPE_LABEL[lastRun.report_type] || lastRun.report_type)}　${esc(SYNC_STATUS_LABEL[lastRun.status] || lastRun.status)}` : '尚無紀錄'}</div></div>
+      </div>
+    </div>
+    <div class="card filters" style="margin-bottom:16px">
+      <label class="inline-check">報表類型 <select id="slReportType">${['全部', ...Object.values(SYNC_REPORT_TYPE_LABEL)].map((v) => opt(v, v, syncLogState.reportType)).join('')}</select></label>
+      <label class="inline-check">狀態 <select id="slStatus">${['全部', ...Object.values(SYNC_STATUS_LABEL)].map((v) => opt(v, v, syncLogState.status)).join('')}</select></label>
+    </div>
+    <div class="muted small" style="margin-bottom:8px">共 ${filtered.length} 筆</div>
+    <div class="tbox"><table class="t">
+      <thead><tr><th>執行時間</th><th>報表類型</th><th>狀態</th><th class="num">匯入筆數</th><th class="num">略過筆數</th><th>涵蓋異常</th><th>錯誤訊息</th><th>執行者</th></tr></thead>
+      <tbody>${filtered.map((r) => {
+        const statusColor = r.status === 'success' ? 'var(--ok)' : r.status === 'failed' ? 'var(--bad)' : r.status === 'partial_failure' ? 'var(--warn)' : 'var(--ink2)';
+        return `<tr>
+          <td class="nowrap">${fmtTime(r.started_at)}</td>
+          <td class="nowrap">${esc(SYNC_REPORT_TYPE_LABEL[r.report_type] || r.report_type)}</td>
+          <td><span style="color:${statusColor};font-weight:600">${esc(SYNC_STATUS_LABEL[r.status] || r.status)}</span></td>
+          <td class="num">${r.rows_imported ?? '—'}</td>
+          <td class="num">${r.rows_skipped ?? '—'}</td>
+          <td>${r.coverage_warning ? '<span style="color:var(--warn);font-weight:600">⚠ 有異常</span>' : '—'}</td>
+          <td class="small" style="max-width:320px">${r.error_detail ? `<span class="${r.status === 'failed' ? 'err-text' : 'muted'}">${esc(r.error_detail)}</span>` : '—'}</td>
+          <td class="nowrap small muted">${esc(r.run_by_name || '')}</td>
+        </tr>`;
+      }).join('') || '<tr><td colspan="8" class="empty">沒有符合條件的紀錄</td></tr>'}</tbody>
+    </table></div>
+
+    <div class="card" style="margin:24px 0 16px">
+      <h2 style="margin:0 0 4px">疑似督導漏填（${missingList.length}）</h2>
+      <p class="small muted" style="margin:4px 0 10px">仁寶系統裡「服務中」或「暫停」的個案，但問案系統完全找不到對應的問案紀錄——代表督導忘記建立問案，需要盡快補登。${latestCaseSummaryRun ? `資料來自 ${fmtTime(latestCaseSummaryRun.started_at)} 的個案總表同步。` : ''}</p>
+      ${missingList.length ? `<div class="tbox"><table class="t"><thead><tr><th>案號</th><th>姓名</th><th>狀態</th><th>主責督導</th><th>服務起始</th></tr></thead>
+        <tbody>${missingList.map((r) => `<tr><td>${esc(r.case_no)}</td><td>${esc(r.name)}</td><td>${esc(r.status)}</td><td>${esc(r.lead_supervisor)}</td><td>${fmtDate(r.service_start_date)}</td></tr>`).join('')}</tbody></table></div>`
+        : `<p class="muted small">${latestCaseSummaryRun ? '目前沒有發現疑似漏填的個案。' : '尚無個案總表同步紀錄，無法顯示比對結果。'}</p>`}
+    </div>
+
+    <div class="card" style="margin-bottom:16px">
+      <h2 style="margin:0 0 4px">案號待確認（${needsReviewList.length}）</h2>
+      <p class="small muted" style="margin:4px 0 10px">問案已成案、也填了仁寶案號，但這個案號在仁寶最新匯入資料裡找不到——原因較多（案號打錯、案號異動、仁寶狀態已不同等），需要人工個別確認，不是單純漏填。</p>
+      ${needsReviewList.length ? `<div class="tbox"><table class="t"><thead><tr><th>博樂問案</th><th>仁寶案號</th><th>原因</th></tr></thead>
+        <tbody>${needsReviewList.map((r) => `<tr><td><a href="#/i/${r.inquiry_id}">${esc(r.inquiry_code)}</a> ${esc(r.client_name || '')}</td><td>${esc(r.case_no)}</td><td class="small muted">${esc(r.reason)}</td></tr>`).join('')}</tbody></table></div>`
+        : `<p class="muted small">${latestCaseSummaryRun ? '目前沒有需要確認的案號。' : '尚無個案總表同步紀錄，無法顯示比對結果。'}</p>`}
+    </div>`;
+
+    $('#slReportType').onchange = (e) => { syncLogState.reportType = e.target.value; draw(); };
+    $('#slStatus').onchange = (e) => { syncLogState.status = e.target.value; draw(); };
+  };
+  draw();
 }
 
 /* ================= 管理 ================= */
