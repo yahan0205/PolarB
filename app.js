@@ -515,6 +515,7 @@ async function viewRotationAdmin() {
 const listState = store.get('bole.list') || { region: null, status: '全部', year: '全部', month: '全部', q: '', mine: false, dateSort: 'desc' };
 if (!listState.dateSort) listState.dateSort = 'desc';
 if (!listState.month) listState.month = '全部';
+if (listState.needsFollowup === undefined) listState.needsFollowup = false;
 let listShow = 100;
 
 async function viewList() {
@@ -525,10 +526,14 @@ async function viewList() {
   ]);
   const changedIds = new Set(rotationFlags.map((x)=>x.inquiry_id));
   const rows = await db.all('inquiries_v', {
-    select: 'id,code,region,inquiry_date,unit_name,case_manager,client_name,address,service_detail,condition_names,intake_staff_id,lead_staff_id,intake_name,status,match_total,match_rejected,match_accepted,match_pending',
+    select: 'id,code,region,inquiry_date,unit_name,case_manager,client_name,address,service_detail,condition_names,intake_staff_id,lead_staff_id,intake_name,status,match_total,match_rejected,match_accepted,match_pending,referral_date,contract_date',
     order: 'inquiry_date.desc.nullslast,code.desc',
   });
   const years = [...new Set(rows.map((r) => rocYear(r.inquiry_date)).filter(Boolean))].sort((a, b) => b - a);
+  // 照會日期／簽約日改成非必填後，成案當下可能還沒補齊，用這個判斷找出「已成案但
+  // 兩個欄位至少有一個還沒填」的問案，讓主責督導可以篩選出來補登，取代原本「存檔
+  // 時強制填寫」的做法。
+  const needsFollowupCount = rows.filter((r) => r.status === '成案' && (!r.referral_date || !r.contract_date)).length;
   const draw = () => {
     store.set('bole.list', listState);
     const q = listState.q.trim().toLowerCase();
@@ -536,6 +541,7 @@ async function viewList() {
       && (listState.year === '全部' || String(rocYear(r.inquiry_date)) === String(listState.year))
       && (listState.month === '全部' || (r.inquiry_date && Number(r.inquiry_date.slice(5, 7)) === Number(listState.month)))
       && (!listState.mine || r.intake_staff_id === me.id || r.lead_staff_id === me.id)
+      && (!listState.needsFollowup || (r.status === '成案' && (!r.referral_date || !r.contract_date)))
       && (!q || [r.code, r.client_name, r.unit_name, r.case_manager, r.address, r.service_detail].some((x) => (x || '').toLowerCase().includes(q))));
     const shown = base.filter((r) => listState.status === '全部' || r.status === listState.status)
       .sort((a, b) => {
@@ -555,6 +561,7 @@ async function viewList() {
       <label class="inline-check">年度 <select id="fyear">${opt('全部', '全部', listState.year)}${years.map((y) => opt(y, `${y} 年`, listState.year)).join('')}</select></label>
       <label class="inline-check">月份 <select id="fmonth" ${listState.year === '全部' ? 'disabled' : ''}>${opt('全部', '全部', listState.month)}${Array.from({ length: 12 }, (_, i) => opt(i + 1, `${i + 1} 月`, listState.month)).join('')}</select></label>
       <label class="inline-check"><input type="checkbox" id="fmine" ${listState.mine ? 'checked' : ''}>我負責的</label>
+      <label class="inline-check" ${needsFollowupCount ? '' : 'style="color:var(--ink2)"'}><input type="checkbox" id="fneedsfollowup" ${listState.needsFollowup ? 'checked' : ''}>成案資料待補${needsFollowupCount ? ` <span class="badge-n">${needsFollowupCount}</span>` : ''}</label>
       <input type="search" class="grow" id="fq" placeholder="搜尋個案、單位、地址、編號" value="${esc(listState.q)}" aria-label="搜尋">
     </div>
     <div class="tbox"><table class="t" style="min-width:1000px">
@@ -570,7 +577,7 @@ async function viewList() {
           <td>${(r.condition_names || []).map((c) => `<span class="chip">${esc(c)}</span>`).join('')}</td>
           <td class="nowrap">${esc(r.intake_name || '')}</td>
           <td class="nowrap small">${matchSummary(r)}</td>
-          <td><span class="st s-${r.status}">${r.status}</span></td>
+          <td><span class="st s-${r.status}">${r.status}</span>${r.status === '成案' && (!r.referral_date || !r.contract_date) ? `<div class="sub" style="color:var(--warn)">⚠ ${[!r.referral_date && '照會日期', !r.contract_date && '簽約日'].filter(Boolean).join('、')}待補</div>` : ''}</td>
         </tr>`).join('') || '<tr><td colspan="10" class="empty">沒有符合條件的問案</td></tr>'}</tbody>
     </table>${shown.length > listShow ? `<div class="more"><button type="button" class="btn" id="more">再顯示 100 筆（還有 ${shown.length - listShow} 筆）</button></div>` : ''}</div>`;
     $('#rotation-peek')?.addEventListener('click',()=>rotationShow(listState.region));
@@ -579,6 +586,7 @@ async function viewList() {
     $('#fyear').onchange = (e) => { listState.year = e.target.value; if (listState.year === '全部') listState.month = '全部'; listShow = 100; draw(); };
     $('#fmonth').onchange = (e) => { listState.month = e.target.value; listShow = 100; draw(); };
     $('#fmine').onchange = (e) => { listState.mine = e.target.checked; listShow = 100; draw(); };
+    $('#fneedsfollowup').onchange = (e) => { listState.needsFollowup = e.target.checked; listShow = 100; draw(); };
     // 跟「個案清單」搜尋框同樣的問題：每次輸入都整個重畫表格（含搜尋框本身），框本身
     // 被換掉會讓焦點、游標位置跟著消失，打字打到一半畫面重畫就會感覺「被中斷」，中文
     // 注音/拼音輸入法選字選到一半被打斷更明顯。修法同個案清單：(1) 中文組字期間
@@ -647,7 +655,7 @@ async function viewForm(id, presetStatus) {
       <label class="f">轉介單位 <span class="req">*</span><input type="text" name="unit_name" list="unitlist" autocomplete="off" value="${esc(L.unitById[r.unit_id]?.name || '')}" placeholder="輸入一個字搜尋">
       <datalist id="unitlist">${activeOr(L.units, r.unit_id).map((u) => `<option value="${esc(u.name)}">`).join('')}</datalist></label>
       <label class="f">個管師<input type="text" name="case_manager" value="${esc(r.case_manager || '')}" placeholder="姓氏即可"></label>
-      <label class="f">個案姓名 <span class="req">*</span><input type="text" name="client_name" value="${esc(r.client_name || '')}"></label>
+      <label class="f">個案姓名<input type="text" name="client_name" value="${esc(r.client_name || '')}" placeholder="選填，尚未知道可先留空"></label>
       <label class="f spanall">地址（區／路名即可） <span class="req">*</span><input type="text" name="address" value="${esc(r.address || '')}"></label>
       <fieldset class="spanall" id="svc-builder">
         <legend>個案細項與安排 <span class="req">*</span></legend>
@@ -670,8 +678,8 @@ async function viewForm(id, presetStatus) {
       <label class="f" id="rotation-lead" data-for="成案">主責督導 <span class="req">*</span><select name="lead_staff_id">${staffOpts(r.lead_staff_id,r.region)}</select></label>
       <div class="spanall small muted" id="rotation-note" hidden>輪接預覽僅供參考，實際分配以儲存時為準。若人工改派，必須填寫原因；新增問案與改派將在同一筆資料庫交易內完成。</div>
       ${!id ? `<div class="spanall card" id="rotation-board" hidden><h2 class="small" style="margin:0 0 8px">輪接現況（僅供查看）</h2><div id="rotation-board-body" class="small mono"></div></div>` : ''}
-      <label class="f" data-for="成案">照會日期 <span class="req">*</span><input type="date" name="referral_date" value="${esc(r.referral_date || '')}"></label>
-      <label class="f" data-for="成案">簽約日 <span class="req">*</span><input type="date" name="contract_date" value="${esc(r.contract_date || '')}"></label>
+      <label class="f" data-for="成案">照會日期<input type="date" name="referral_date" value="${esc(r.referral_date || '')}"></label>
+      <label class="f" data-for="成案">簽約日<input type="date" name="contract_date" value="${esc(r.contract_date || '')}"></label>
       <label class="f" data-for="成案">仁寶案號<input type="text" name="case_no" value="${esc(r.case_no || '')}" placeholder="選填"></label>
       <label class="f" data-for="未成案">未成案原因 <span class="req">*</span><select name="nc_reason_id">${opt('', '請選擇', r.nc_reason_id)}${activeOr(L.nc, r.nc_reason_id).map((x) => opt(x.id, x.name, r.nc_reason_id)).join('')}</select></label>
       <label class="f span2" data-for="未成案">未成案說明<input type="text" name="nc_note" value="${esc(r.nc_note || '')}"></label>
@@ -791,13 +799,16 @@ async function viewForm(id, presetStatus) {
     };
     const miss = [];
     if (!body.region) miss.push('區域'); if (!body.inquiry_date) miss.push('問案日期'); if (!body.intake_staff_id) miss.push('收案督導');
-    if (!body.unit_id) miss.push(unitNameRaw ? '轉介單位（輸入的名稱不在清單裡，請從建議選單選擇）' : '轉介單位'); if (!body.client_name) miss.push('個案姓名'); if (!body.address) miss.push('地址');
+    if (!body.unit_id) miss.push(unitNameRaw ? '轉介單位（輸入的名稱不在清單裡，請從建議選單選擇）' : '轉介單位'); if (!body.address) miss.push('地址');
     if (!body.service_detail) miss.push('個案細項與安排');
     $$('.svc-segment', f).forEach((card, i) => {
       const s = $('.seg-start', card).value, en = $('.seg-end', card).value;
       if ((s && !en) || (!s && en)) miss.push(`第 ${i + 1} 個時段的起訖時間請選完整或都留空`);
     });
-    if (body.status === '成案') { if (!body.lead_staff_id && !rotationByRegion[body.region]?.enabled) miss.push('主責督導'); if (!body.referral_date) miss.push('照會日期'); if (!body.contract_date) miss.push('簽約日'); }
+    // 照會日期／簽約日改成非必填（115/11/20 起）：督導有時來不及當下補齊，先讓成案
+    // 流程不被卡住，缺漏的部分改用「問案」列表的「成案資料待補」篩選提醒補登，
+    // 不在這裡擋存檔。主責督導仍是必填，沒有它輪接/派案邏輯會失去意義。
+    if (body.status === '成案') { if (!body.lead_staff_id && !rotationByRegion[body.region]?.enabled) miss.push('主責督導'); }
     if (body.status === '未成案' && !body.nc_reason_id) miss.push('未成案原因');
     const er = $('#ferr');
     if (miss.length) { er.textContent = `請填寫：${miss.join('、')}`; er.hidden = false; return; }
@@ -907,7 +918,7 @@ async function viewDetail(id) {
         ${dd('地址', esc(r.address), true)}
         ${dd('個案細項與安排', r.service_detail ? `<span class="mono">${esc(r.service_detail)}</span>` : '', true)}
         ${dd('特殊條件', (r.condition_names || []).map((c) => `<span class="chip">${esc(c)}</span>`).join('') + (r.condition_other_note ? ` <span class="small muted">${esc(r.condition_other_note)}</span>` : ''), true)}
-        ${dd('預計主責居服', esc(r.expected_caregiver))}${dd('照會日期／簽約日', [fmtDate(r.referral_date), fmtDate(r.contract_date)].filter(Boolean).join(' ／ '))}
+        ${dd('預計主責居服', esc(r.expected_caregiver))}${dd('照會日期／簽約日', [fmtDate(r.referral_date), fmtDate(r.contract_date)].filter(Boolean).join(' ／ ') + (r.status === '成案' && (!r.referral_date || !r.contract_date) ? ` <span style="color:var(--warn)">⚠ 尚未補齊，請至編輯頁補登</span>` : ''))}
         ${dd('仁寶案號', esc(r.case_no))}
         ${r.status === '未成案' ? dd('未成案原因', esc(r.nc_reason_name)) + dd('未成案說明', esc(r.nc_note)) : ''}
         ${dd('特殊事項', esc(r.remarks), true)}
@@ -1059,8 +1070,8 @@ async function promptAcceptCase(inq) {
         <label class="f">主責督導 <span class="req">*</span><select name="lead_staff_id" ${hasRotation && !isAdmin() ? 'disabled' : ''}>${staffOpts}</select></label>
         ${hasRotation ? `<label class="f" id="accept-reason-wrap" hidden>更換主責督導原因 <span class="req">*</span>
           <textarea name="rotation_reason" rows="3" placeholder="請說明更換原因，將保留異動歷程"></textarea></label>` : ''}
-        <label class="f">照會日期 <span class="req">*</span><input type="date" name="referral_date" value="${esc(todayISO())}"></label>
-        <label class="f">簽約日 <span class="req">*</span><input type="date" name="contract_date"></label>
+        <label class="f">照會日期<input type="date" name="referral_date" value="${esc(todayISO())}"></label>
+        <label class="f">簽約日<input type="date" name="contract_date"></label>
         <p class="err-text" id="acerr" hidden></p>
       </div>
       <div class="acts"><button type="button" class="btn" data-no>先不要</button><button type="button" class="btn primary" data-yes>標記成案</button></div>`,
@@ -1082,8 +1093,6 @@ async function promptAcceptCase(inq) {
         const er = $('#acerr', box);
         const miss = [];
         if (!lead_staff_id) miss.push('主責督導');
-        if (!referral_date) miss.push('照會日期');
-        if (!contract_date) miss.push('簽約日');
         if (hasRotation && lead_staff_id !== Number(inq.lead_staff_id) && !reason) miss.push('更換主責督導原因');
         if (miss.length) { er.textContent = `請填寫：${miss.join('、')}`; er.hidden = false; return; }
         const submit = $('[data-yes]', box);
