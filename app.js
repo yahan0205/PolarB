@@ -266,9 +266,22 @@ async function refreshJudgeCount() {
   drawNav();
 }
 
+// 待辦事項完成通知：交辦人（建立者）打開「待辦事項」頁面前，用這筆數字當
+// 導覽列的提醒徽章——別人已經完成、但我還沒讀過的待辦事項數量。
+let pendingTodoAck = 0;
+async function refreshTodoAckCount() {
+  if (!me) return;
+  try {
+    const rows = await db.all('todos', { select: 'id', created_by_staff_id: `eq.${me.id}`, status: 'eq.已完成', completed_ack_at: 'is.null' });
+    pendingTodoAck = rows.length;
+  } catch { pendingTodoAck = 0; }
+  drawNav();
+}
+
 function drawNav() {
   const h = location.hash || '#/';
   const items = [['#/', '問案', /^#\/($|i\/|new)/], ['#/cases', '個案清單', /^#\/cases/], ['#/report', '派案紀錄', /^#\/report/], ['#/stats', '統計', /^#\/stats/], ['#/visitaudit', '家電訪稽核', /^#\/visitaudit/]];
+  items.push(['#/todos', `待辦事項${pendingTodoAck ? `<span class="badge-n">${pendingTodoAck}</span>` : ''}`, /^#\/todos/]);
   if (isDirector()) {
     items.push(['#/judge', `拒案判定${pendingJudge ? `<span class="badge-n">${pendingJudge}</span>` : ''}`, /^#\/judge/]);
     items.push(['#/synclog', '同步紀錄', /^#\/synclog/]);
@@ -294,7 +307,7 @@ async function render() {
       main.innerHTML = `<div class="card login stack"><h1>帳號尚未啟用</h1><p>這個帳號還沒有連到人員名單，或已被停用。請聯絡管理者。</p><button type="button" class="btn" id="lo">登出</button></div>`;
       $('#lo').onclick = signOut; return;
     }
-    if (!L) { await loadLookups(); refreshJudgeCount(); }
+    if (!L) { await loadLookups(); refreshJudgeCount(); refreshTodoAckCount(); }
     $('#topbar').hidden = false; drawNav();
     const h = location.hash || '#/';
     let m;
@@ -305,6 +318,7 @@ async function render() {
     else if (h === '#/judge' && isDirector()) await viewJudge();
     else if (h === '#/synclog' && isDirector()) await viewSyncLog();
     else if (h === '#/visitaudit') await viewVisitAudit();
+    else if (h === '#/todos') await viewTodos();
     else if (h === '#/cases') await viewCases();
     else if (h === '#/report') await viewReport();
     else if (h === '#/stats') await viewStats();
@@ -2549,6 +2563,196 @@ async function drawUnitAbbrSection(box) {
     if (!(await confirmBox('確定要從縮寫設定清單移除這一列嗎？', '移除', true))) return;
     try { await db.remove('unit_abbrs', Number(btn.dataset.uadel)); toast('已移除'); drawUnitAbbrSection(box); } catch (e) { toast(e.message, true); }
   }));
+}
+
+/* ================= 待辦事項 ================= */
+// 四象限（每月/臨時 × 主管交辦/自己建立）純粹是前端分類方式，資料庫只有一張
+// todos 表：source_template_id 有值＝每月範本自動產生的實例；created_by_staff_id
+// 是不是自己＝主管交辦 vs 自己建立。範本（is_monthly=true）本身不是任務，不進
+// 四象限，另外收在「每月範本設定」區塊管理。見 sql/22_todos.sql 的完整設計說明。
+const todoRpc = (name, args) => rest('POST', `rpc/${name}`, { body: args || {} });
+let todoState = { showTemplates: false };
+
+async function viewTodos() {
+  $('#main').innerHTML = `
+  <div class="head"><div><h1>待辦事項</h1><div class="muted small" style="margin-top:4px">每月交辦與臨時待辦，主管與督導可以互相指派，只看得到自己建立或被指派的項目。</div></div>
+    <div class="right"><button type="button" class="btn primary" id="todoNew">＋ 新增待辦事項</button></div></div>
+  <div id="todo-body"><p class="muted">載入中…</p></div>`;
+  $('#todoNew').onclick = () => openTodoEditor(null, [], () => viewTodos());
+  const box = $('#todo-body');
+  // 每次打開頁面先確保這個月該產生的每月任務都產生了，任何人打開都可以觸發，
+  // 用資料庫那邊的 unique index 擋重複，併發也安全，失敗不擋顯示。
+  try { await todoRpc('generate_due_monthly_todos'); } catch { /* 忽略，資料仍會正常顯示，只是可能少這個月的新實例 */ }
+  let todos, assignees;
+  try {
+    [todos, assignees] = await Promise.all([
+      db.all('todos', { order: 'due_date.asc.nullslast,id.desc' }),
+      // todo_assignees 是複合主鍵（todo_id, staff_id），沒有 id 欄位，db.all() 沒指定
+      // order 時預設的「id 遊標分頁」用不了，這裡用 offset 分頁（表很小，不用擔心效能）。
+      db.all('todo_assignees', { order: 'todo_id' }),
+    ]);
+  } catch (e) { box.innerHTML = `<div class="card"><p class="err-text">${esc(e.message)}</p></div>`; return; }
+  const assigneesByTodo = {};
+  assignees.forEach((a) => { (assigneesByTodo[a.todo_id] ||= []).push(a.staff_id); });
+  const namesOf = (id) => (assigneesByTodo[id] || []).map((sid) => L.staffById[sid]?.name).filter(Boolean).join('、') || '—';
+
+  // 完成通知：我是建立者、對方已經標記完成但我還沒讀過的，列出來提醒（站內通知，
+  // 沒有 email/簡訊管道，讀過之後按「知道了」清掉，對應 completed_ack_at）。
+  const unacked = todos.filter((t) => t.created_by_staff_id === me.id && t.status === '已完成' && !t.completed_ack_at);
+
+  const templates = todos.filter((t) => t.is_monthly);
+  const actionable = todos.filter((t) => !t.is_monthly);
+  const canVisit = (t) => isDirector() || t.created_by_staff_id === me.id || (assigneesByTodo[t.id] || []).includes(me.id);
+  const quadrant = (fromOthers, monthly) => actionable.filter((t) =>
+    Boolean(t.source_template_id) === monthly && (t.created_by_staff_id !== me.id) === fromOthers && canVisit(t));
+  const quads = [
+    ['每月交辦（主管交辦）', quadrant(true, true)],
+    ['每月交辦（自己建立）', quadrant(false, true)],
+    ['臨時待辦（主管交辦）', quadrant(true, false)],
+    ['臨時待辦（自己建立）', quadrant(false, false)],
+  ];
+
+  const renderRow = (t) => {
+    const overdue = t.status === '待處理' && t.due_date && t.due_date < todayISO();
+    return `<div class="card" style="margin-bottom:8px;padding:14px">
+      <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;flex-wrap:wrap">
+        <div>
+          <div>${t.is_urgent ? '<span style="color:var(--bad);font-weight:700">急</span> ' : ''}<strong>${esc(t.title)}</strong>${t.status === '已完成' ? ' <span class="small" style="color:var(--ok)">✓ 已完成</span>' : ''}</div>
+          <div class="small muted" style="margin-top:2px">指派給：${esc(namesOf(t.id))}　建立：${esc(L.staffById[t.created_by_staff_id]?.name || '')}${t.due_date ? `　截止：${fmtDate(t.due_date)}${overdue ? ' <span style="color:var(--bad)">（已逾期）</span>' : ''}` : ''}</div>
+          ${t.content ? `<div class="small" style="margin-top:6px;white-space:pre-wrap">${esc(t.content)}</div>` : ''}
+        </div>
+        <div style="display:flex;gap:6px;flex-shrink:0">
+          ${t.status === '待處理' ? `<button type="button" class="btn small" data-tcomplete="${t.id}">完成</button>` : `<button type="button" class="btn small" data-treopen="${t.id}">取消完成</button>`}
+          ${(isDirector() || t.created_by_staff_id === me.id) ? `<button type="button" class="btn small" data-tedit="${t.id}">編輯</button><button type="button" class="btn small" style="color:var(--bad)" data-tdel="${t.id}">刪除</button>` : ''}
+        </div>
+      </div>
+    </div>`;
+  };
+
+  box.innerHTML = `
+  ${unacked.length ? `<div class="card" style="margin-bottom:16px;border-color:var(--ok)">
+    <h2 style="margin:0 0 8px">完成通知（${unacked.length}）</h2>
+    ${unacked.map((t) => `<div class="small" style="margin-bottom:6px">${esc(L.staffById[t.completed_by_staff_id]?.name || '（不明人員）')} 已完成你指派的「${esc(t.title)}」（${fmtTime(t.completed_at)}） <button type="button" class="link" data-tack="${t.id}">知道了</button></div>`).join('')}
+  </div>` : ''}
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+    ${quads.map(([label, rows]) => `<div class="card">
+      <h2 style="margin:0 0 10px">${label}（${rows.length}）</h2>
+      ${rows.length ? rows.map(renderRow).join('') : '<p class="muted small">目前沒有任務。</p>'}
+    </div>`).join('')}
+  </div>
+  <div class="card" style="margin-top:16px">
+    <div style="display:flex;justify-content:space-between;align-items:center">
+      <h2 style="margin:0">每月範本設定（${templates.length}）</h2>
+      <button type="button" class="btn small" id="todoTplToggle">${todoState.showTemplates ? '收合' : '展開'}</button>
+    </div>
+    ${todoState.showTemplates ? (templates.length ? templates.filter(canVisit).map((t) => `<div class="card" style="margin:10px 0 0">
+      <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap">
+        <div><strong>${esc(t.title)}</strong>${t.active ? '' : ' <span class="small muted">（已停用，不再產生新實例）</span>'}
+          <div class="small muted">每月 ${t.monthly_day ? `${t.monthly_day} 號` : '月底'} 到期；指派給：${esc(namesOf(t.id))}</div>
+        </div>
+        <div style="display:flex;gap:6px;flex-shrink:0">
+          <button type="button" class="btn small" data-tpltoggle="${t.id}">${t.active ? '停用' : '啟用'}</button>
+          <button type="button" class="btn small" data-tedit="${t.id}">編輯</button>
+          <button type="button" class="btn small" style="color:var(--bad)" data-tdel="${t.id}">刪除</button>
+        </div>
+      </div>
+    </div>`).join('') : '<p class="muted small" style="margin:10px 0 0">還沒有設定每月範本。</p>') : ''}
+  </div>`;
+
+  $('#todoTplToggle')?.addEventListener('click', () => { todoState.showTemplates = !todoState.showTemplates; viewTodos(); });
+  $$('[data-tack]').forEach((b) => (b.onclick = async () => {
+    try { await db.update('todos', Number(b.dataset.tack), { completed_ack_at: new Date().toISOString() }); refreshTodoAckCount(); viewTodos(); }
+    catch (e) { toast(e.message, true); }
+  }));
+  $$('[data-tcomplete]').forEach((b) => (b.onclick = async () => {
+    try { await todoRpc('complete_todo', { p_todo_id: Number(b.dataset.tcomplete) }); toast('已標記完成'); viewTodos(); }
+    catch (e) { toast(e.message, true); }
+  }));
+  $$('[data-treopen]').forEach((b) => (b.onclick = async () => {
+    try { await todoRpc('reopen_todo', { p_todo_id: Number(b.dataset.treopen) }); toast('已重新開啟'); viewTodos(); }
+    catch (e) { toast(e.message, true); }
+  }));
+  $$('[data-tpltoggle]').forEach((b) => (b.onclick = async () => {
+    const t = templates.find((x) => x.id === Number(b.dataset.tpltoggle));
+    try { await db.update('todos', t.id, { active: !t.active }); viewTodos(); } catch (e) { toast(e.message, true); }
+  }));
+  $$('[data-tedit]').forEach((b) => (b.onclick = () => {
+    const t = todos.find((x) => x.id === Number(b.dataset.tedit));
+    openTodoEditor(t, assigneesByTodo[t.id] || [], () => viewTodos());
+  }));
+  $$('[data-tdel]').forEach((b) => (b.onclick = async () => {
+    if (!(await confirmBox('確定要刪除這筆待辦事項嗎？無法復原（如果是每月範本，之後也不會再自動產生新的）。', '刪除', true))) return;
+    try { await db.remove('todos', Number(b.dataset.tdel)); toast('已刪除'); viewTodos(); } catch (e) { toast(e.message, true); }
+  }));
+}
+
+function openTodoEditor(t, currentAssigneeIds, afterDone) {
+  const isEdit = Boolean(t);
+  t = t || { title: '', content: '', is_urgent: false, is_monthly: false, monthly_day: null, due_date: '' };
+  // 指派對象：在職、非行政角色（行政只負責結案箱年度，不參與待辦事項）。
+  const pool = L.staff.filter((s) => s.active && s.role !== 'clerk');
+  modal(`<h2>${isEdit ? '編輯待辦事項' : '新增待辦事項'}</h2>
+    <div class="stack">
+      <label class="f">標題 <span class="req">*</span><input type="text" name="title" value="${esc(t.title)}"></label>
+      <label class="f spanall">內容<textarea name="content" style="min-height:70px">${esc(t.content || '')}</textarea></label>
+      <label class="inline-check"><input type="checkbox" name="is_urgent" ${t.is_urgent ? 'checked' : ''}>緊急事項（標題旁會顯示紅色「急」）</label>
+      <label class="inline-check"><input type="checkbox" name="is_monthly" ${t.is_monthly ? 'checked' : ''}>每月交辦事項（每月自動產生一筆新任務，不用每月重新指定）</label>
+      <label class="f" id="todo-due-wrap">截止日期<input type="date" name="due_date" value="${esc(t.due_date || '')}"></label>
+      <label class="f" id="todo-monthly-wrap" hidden>每月第幾號到期<input type="number" name="monthly_day" min="1" max="31" value="${t.monthly_day || ''}" placeholder="留空＝每月最後一天"></label>
+      <div class="f spanall">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <span>指派對象</span>
+          <span style="display:flex;gap:6px">
+            <button type="button" class="btn small" data-selregion="新莊">全選新莊</button>
+            <button type="button" class="btn small" data-selregion="淡水">全選淡水</button>
+          </span>
+        </div>
+        <div class="checks" style="margin-top:6px">${pool.map((s) => `<label><input type="checkbox" class="todo-assignee" value="${s.id}" data-region="${esc(s.region || '')}" ${currentAssigneeIds.includes(s.id) ? 'checked' : ''}>${esc(s.name)}${s.region ? `（${esc(s.region)}）` : ''}</label>`).join('')}</div>
+      </div>
+      <p class="err-text" id="todoerr" hidden></p>
+    </div>
+    <div class="acts"><button type="button" class="btn" data-no>取消</button><button type="button" class="btn primary" data-yes>${isEdit ? '儲存' : '建立'}</button></div>`,
+  (m, close) => {
+    const syncDueMode = () => {
+      const monthly = $('[name=is_monthly]', m).checked;
+      $('#todo-due-wrap', m).hidden = monthly;
+      $('#todo-monthly-wrap', m).hidden = !monthly;
+    };
+    $('[name=is_monthly]', m).onchange = syncDueMode; syncDueMode();
+    $$('[data-selregion]', m).forEach((b) => (b.onclick = () => {
+      $$('.todo-assignee', m).forEach((cb) => { if (cb.dataset.region === b.dataset.selregion) cb.checked = true; });
+    }));
+    $('[data-no]', m).onclick = close;
+    $('[data-yes]', m).onclick = async () => {
+      const er = $('#todoerr', m); er.hidden = true;
+      const title = $('[name=title]', m).value.trim();
+      const content = $('[name=content]', m).value.trim() || null;
+      const is_urgent = $('[name=is_urgent]', m).checked;
+      const is_monthly = $('[name=is_monthly]', m).checked;
+      const monthly_day = is_monthly ? (Number($('[name=monthly_day]', m).value) || null) : null;
+      const due_date = is_monthly ? null : ($('[name=due_date]', m).value || null);
+      const assigneeIds = $$('.todo-assignee:checked', m).map((cb) => Number(cb.value));
+      const miss = [];
+      if (!title) miss.push('標題');
+      if (!assigneeIds.length) miss.push('指派對象');
+      if (miss.length) { er.textContent = `請填寫：${miss.join('、')}`; er.hidden = false; return; }
+      const btn = $('[data-yes]', m); btn.disabled = true;
+      try {
+        let id;
+        if (isEdit) {
+          id = t.id;
+          await db.update('todos', id, { title, content, is_urgent, is_monthly, monthly_day, due_date });
+          await rest('DELETE', 'todo_assignees', { params: { todo_id: `eq.${id}` } });
+        } else {
+          const saved = await db.insert('todos', { title, content, is_urgent, is_monthly, monthly_day, due_date, created_by_staff_id: me.id });
+          id = saved.id;
+        }
+        await db.insertMany('todo_assignees', assigneeIds.map((staff_id) => ({ todo_id: id, staff_id })));
+        toast(isEdit ? '已儲存' : '已建立待辦事項');
+        close(); afterDone?.();
+      } catch (e) { er.textContent = e.message; er.hidden = false; btn.disabled = false; }
+    };
+  });
 }
 
 /* ================= 啟動 ================= */
