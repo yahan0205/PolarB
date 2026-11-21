@@ -282,6 +282,8 @@ function drawNav() {
   const h = location.hash || '#/';
   const items = [['#/', '問案', /^#\/($|i\/|new)/], ['#/cases', '個案清單', /^#\/cases/], ['#/report', '派案紀錄', /^#\/report/], ['#/stats', '統計', /^#\/stats/], ['#/visitaudit', '家電訪稽核', /^#\/visitaudit/]];
   items.push(['#/todos', `待辦事項${pendingTodoAck ? `<span class="badge-n">${pendingTodoAck}</span>` : ''}`, /^#\/todos/]);
+  // 行政角色（clerk）權限只限結案箱年度，這個功能不開放給他看。
+  if (!isArchiveClerk()) items.push(['#/cgaudit', '居服員稽核', /^#\/cgaudit/]);
   if (isDirector()) {
     items.push(['#/judge', `拒案判定${pendingJudge ? `<span class="badge-n">${pendingJudge}</span>` : ''}`, /^#\/judge/]);
     items.push(['#/synclog', '同步紀錄', /^#\/synclog/]);
@@ -319,6 +321,8 @@ async function render() {
     else if (h === '#/synclog' && isDirector()) await viewSyncLog();
     else if (h === '#/visitaudit') await viewVisitAudit();
     else if (h === '#/todos') await viewTodos();
+    else if (h === '#/cgaudit' && !isArchiveClerk()) await viewCaregiverAuditList();
+    else if ((m = h.match(/^#\/cgaudit\/(\d+)$/)) && !isArchiveClerk()) await viewCaregiverAuditDetail(Number(m[1]));
     else if (h === '#/cases') await viewCases();
     else if (h === '#/report') await viewReport();
     else if (h === '#/stats') await viewStats();
@@ -2763,6 +2767,134 @@ function openTodoEditor(t, currentAssigneeIds, afterDone) {
         }
         await db.insertMany('todo_assignees', assigneeIds.map((staff_id) => ({ todo_id: id, staff_id })));
         toast(isEdit ? '已儲存' : '已建立待辦事項');
+        close(); afterDone?.();
+      } catch (e) { er.textContent = e.message; er.hidden = false; btn.disabled = false; }
+    };
+  });
+}
+
+/* ================= 居服員稽核 ================= */
+// 紀錄每位居服員每年度的優良事項／改善事項（刻意不用「優/劣」這種評價字眼）。
+// 督導只能編輯自己負責區域的居服員，管理者/主任不限區域；查看不限區域（跟
+// 「問案」列表一樣，預設看自己的區域但可以切換看別區）。行政角色不開放使用。
+// 見 sql/24_caregiver_audits.sql 的完整設計說明。
+let cgAuditState = { region: null, q: '' };
+const canEditCgAudit = (cg) => isDirector() || (me.region && cg.region === me.region);
+
+async function viewCaregiverAuditList() {
+  if (cgAuditState.region === null) cgAuditState.region = me.region || '全部';
+  const draw = () => {
+    const q = cgAuditState.q.trim().toLowerCase();
+    const rows = L.cg.filter((c) => (cgAuditState.region === '全部' || c.region === cgAuditState.region)
+      && (!q || c.name.toLowerCase().includes(q) || (c.code || '').toLowerCase().includes(q)));
+    $('#main').innerHTML = `
+    <div class="head"><div><h1>居服員稽核</h1><div class="muted small" style="margin-top:4px">紀錄每位居服員每年度的優良事項／改善事項，督導只能編輯自己負責區域的居服員。</div></div></div>
+    <div class="card filters">
+      <div class="seg" role="group" aria-label="區域">${['全部', ...REGIONS].map((r) => `<button type="button" data-region="${r}" class="${cgAuditState.region === r ? 'on' : ''}">${r}</button>`).join('')}</div>
+      <input type="search" class="grow" id="cgaQ" placeholder="搜尋居服員姓名、編號" value="${esc(cgAuditState.q)}" aria-label="搜尋">
+    </div>
+    <div class="tbox"><table class="t">
+      <thead><tr><th>編號</th><th>姓名</th><th>區域</th><th>狀態</th><th></th></tr></thead>
+      <tbody>${rows.map((c) => `<tr class="click" data-id="${c.id}">
+        <td class="nowrap">${esc(c.code || '')}</td>
+        <td>${esc(c.name)}</td>
+        <td>${esc(c.region || '')}</td>
+        <td>${c.active ? '' : '<span class="muted small">已停用</span>'}</td>
+        <td class="small muted">${canEditCgAudit(c) ? '' : '唯讀（非本區）'}</td>
+      </tr>`).join('') || '<tr><td colspan="5" class="empty">沒有符合條件的居服員</td></tr>'}</tbody>
+    </table></div>`;
+    $$('[data-region]').forEach((b) => (b.onclick = () => { cgAuditState.region = b.dataset.region; draw(); }));
+    $('#cgaQ').oninput = (e) => { cgAuditState.q = e.target.value; draw(); };
+    $$('tr.click').forEach((tr) => (tr.onclick = () => { location.hash = `#/cgaudit/${tr.dataset.id}`; }));
+  };
+  draw();
+}
+
+async function viewCaregiverAuditDetail(cgId) {
+  const cg = L.cgById[cgId];
+  if (!cg) { $('#main').innerHTML = '<div class="card empty">找不到這位居服員。</div>'; return; }
+  const editable = canEditCgAudit(cg);
+  $('#main').innerHTML = `
+  <a href="#/cgaudit" class="small" style="text-decoration:none">← 回居服員稽核列表</a>
+  <div class="head" style="margin-top:10px"><div><h1>${esc(cg.name)}</h1><div class="muted small" style="margin-top:4px">${esc(cg.code || '')}　${esc(cg.region || '')}${editable ? '' : '　<span style="color:var(--warn)">非本區，唯讀</span>'}</div></div>
+    <div class="right">${editable ? '<button type="button" class="btn primary" id="cgaNew">＋ 新增紀錄</button>' : ''}</div></div>
+  <div id="cga-body"><p class="muted">載入中…</p></div>`;
+  $('#cgaNew')?.addEventListener('click', () => openCgAuditEditor(cg, null, () => viewCaregiverAuditDetail(cgId)));
+  const box = $('#cga-body');
+  let rows;
+  try { rows = await db.all('caregiver_audits', { caregiver_id: `eq.${cgId}`, order: 'roc_year.desc,event_date.desc.nullslast' }); }
+  catch (e) { box.innerHTML = `<div class="card"><p class="err-text">${esc(e.message)}</p></div>`; return; }
+  if (!rows.length) { box.innerHTML = '<div class="card empty">還沒有任何紀錄。</div>'; return; }
+  const byYear = {};
+  rows.forEach((r) => { (byYear[r.roc_year] ||= []).push(r); });
+  const years = Object.keys(byYear).map(Number).sort((a, b) => b - a);
+  const renderEntry = (r) => `<div class="card" style="margin-bottom:8px;padding:14px">
+    <div style="display:flex;justify-content:space-between;gap:8px;align-items:flex-start;flex-wrap:wrap">
+      <div>
+        <strong>${esc(r.title)}</strong>
+        <div class="small muted" style="margin-top:2px">${r.event_date ? `事件日期：${fmtDate(r.event_date)}　` : ''}記錄：${esc(L.staffById[r.created_by_staff_id]?.name || '')}　${fmtTime(r.created_at)}</div>
+        ${r.content ? `<div class="small" style="margin-top:6px;white-space:pre-wrap">${esc(r.content)}</div>` : ''}
+      </div>
+      ${editable ? `<div style="display:flex;gap:6px;flex-shrink:0"><button type="button" class="btn small" data-cgaedit="${r.id}">編輯</button><button type="button" class="btn small" style="color:var(--bad)" data-cgadel="${r.id}">刪除</button></div>` : ''}
+    </div>
+  </div>`;
+  box.innerHTML = years.map((y) => {
+    const good = byYear[y].filter((r) => r.category === '優良事項');
+    const bad = byYear[y].filter((r) => r.category === '改善事項');
+    return `<div class="card" style="margin-bottom:16px">
+      <h2 style="margin:0 0 10px">${y} 年</h2>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+        <div><h3 class="small muted" style="margin:0 0 8px">優良事項（${good.length}）</h3>${good.length ? good.map(renderEntry).join('') : '<p class="muted small">無紀錄。</p>'}</div>
+        <div><h3 class="small muted" style="margin:0 0 8px">改善事項（${bad.length}）</h3>${bad.length ? bad.map(renderEntry).join('') : '<p class="muted small">無紀錄。</p>'}</div>
+      </div>
+    </div>`;
+  }).join('');
+  $$('[data-cgaedit]').forEach((b) => (b.onclick = () => {
+    const r = rows.find((x) => x.id === Number(b.dataset.cgaedit));
+    openCgAuditEditor(cg, r, () => viewCaregiverAuditDetail(cgId));
+  }));
+  $$('[data-cgadel]').forEach((b) => (b.onclick = async () => {
+    if (!(await confirmBox('確定要刪除這筆紀錄嗎？無法復原。', '刪除', true))) return;
+    try { await db.remove('caregiver_audits', Number(b.dataset.cgadel)); toast('已刪除'); viewCaregiverAuditDetail(cgId); }
+    catch (e) { toast(e.message, true); }
+  }));
+}
+
+function openCgAuditEditor(cg, r, afterDone) {
+  const isEdit = Boolean(r);
+  r = r || { roc_year: new Date().getFullYear() - 1911, category: '優良事項', title: '', content: '', event_date: '' };
+  const thisRocYear = new Date().getFullYear() - 1911;
+  const years = []; for (let y = thisRocYear + 1; y >= 114; y--) years.push(y);
+  modal(`<h2>${isEdit ? '編輯紀錄' : '新增紀錄'}：${esc(cg.name)}</h2>
+    <div class="stack">
+      <div class="grid3">
+        <label class="f">年度 <span class="req">*</span><select name="roc_year">${years.map((y) => opt(y, `${y} 年`, r.roc_year)).join('')}</select></label>
+        <label class="f">類別 <span class="req">*</span><select name="category">${opt('優良事項', '優良事項', r.category)}${opt('改善事項', '改善事項', r.category)}</select></label>
+        <label class="f">事件日期<input type="date" name="event_date" value="${esc(r.event_date || '')}"></label>
+      </div>
+      <label class="f spanall">標題 <span class="req">*</span><input type="text" name="title" value="${esc(r.title)}"></label>
+      <label class="f spanall">內容說明<textarea name="content" style="min-height:80px">${esc(r.content || '')}</textarea></label>
+      <p class="err-text" id="cgaerr" hidden></p>
+    </div>
+    <div class="acts"><button type="button" class="btn" data-no>取消</button><button type="button" class="btn primary" data-yes>${isEdit ? '儲存' : '建立'}</button></div>`,
+  (m, close) => {
+    $('[data-no]', m).onclick = close;
+    $('[data-yes]', m).onclick = async () => {
+      const er = $('#cgaerr', m); er.hidden = true;
+      const title = $('[name=title]', m).value.trim();
+      if (!title) { er.textContent = '請填寫：標題'; er.hidden = false; return; }
+      const body = {
+        roc_year: Number($('[name=roc_year]', m).value),
+        category: $('[name=category]', m).value,
+        title,
+        content: $('[name=content]', m).value.trim() || null,
+        event_date: $('[name=event_date]', m).value || null,
+      };
+      const btn = $('[data-yes]', m); btn.disabled = true;
+      try {
+        if (isEdit) await db.update('caregiver_audits', r.id, body);
+        else await db.insert('caregiver_audits', { ...body, caregiver_id: cg.id, created_by_staff_id: me.id });
+        toast(isEdit ? '已儲存' : '已建立');
         close(); afterDone?.();
       } catch (e) { er.textContent = e.message; er.hidden = false; btn.disabled = false; }
     };
