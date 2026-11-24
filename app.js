@@ -2778,7 +2778,7 @@ function openTodoEditor(t, currentAssigneeIds, afterDone) {
 // 督導只能編輯自己負責區域的居服員，管理者/主任不限區域；查看不限區域（跟
 // 「問案」列表一樣，預設看自己的區域但可以切換看別區）。行政角色不開放使用。
 // 見 sql/24_caregiver_audits.sql 的完整設計說明。
-let cgAuditState = { region: null, q: '' };
+let cgAuditState = { region: null, q: '', showInactive: false };
 const canEditCgAudit = (cg) => isDirector() || (me.region && cg.region === me.region);
 
 async function viewCaregiverAuditList() {
@@ -2786,11 +2786,15 @@ async function viewCaregiverAuditList() {
   const draw = () => {
     const q = cgAuditState.q.trim().toLowerCase();
     const rows = L.cg.filter((c) => (cgAuditState.region === '全部' || c.region === cgAuditState.region)
-      && (!q || c.name.toLowerCase().includes(q) || (c.code || '').toLowerCase().includes(q)));
+      && (cgAuditState.showInactive || c.active)
+      && (!q || c.name.toLowerCase().includes(q) || (c.code || '').toLowerCase().includes(q)))
+      // 固定照員編遞增排序（不受 L.cg 原本的載入順序影響）。
+      .sort((a, b) => (a.code || '').localeCompare(b.code || '', undefined, { numeric: true }));
     $('#main').innerHTML = `
     <div class="head"><div><h1>居服員稽核</h1><div class="muted small" style="margin-top:4px">紀錄每位居服員每年度的優良事項／改善事項，督導只能編輯自己負責區域的居服員。</div></div></div>
     <div class="card filters">
       <div class="seg" role="group" aria-label="區域">${['全部', ...REGIONS].map((r) => `<button type="button" data-region="${r}" class="${cgAuditState.region === r ? 'on' : ''}">${r}</button>`).join('')}</div>
+      <label class="inline-check"><input type="checkbox" id="cgaShowInactive" ${cgAuditState.showInactive ? 'checked' : ''}>顯示離職</label>
       <input type="search" class="grow" id="cgaQ" placeholder="搜尋居服員姓名、編號" value="${esc(cgAuditState.q)}" aria-label="搜尋">
     </div>
     <div class="tbox"><table class="t">
@@ -2799,11 +2803,12 @@ async function viewCaregiverAuditList() {
         <td class="nowrap">${esc(c.code || '')}</td>
         <td>${esc(c.name)}</td>
         <td>${esc(c.region || '')}</td>
-        <td>${c.active ? '' : '<span class="muted small">已停用</span>'}</td>
+        <td>${c.active ? '在職' : '<span class="muted small">離職</span>'}</td>
         <td class="small muted">${canEditCgAudit(c) ? '' : '唯讀（非本區）'}</td>
       </tr>`).join('') || '<tr><td colspan="5" class="empty">沒有符合條件的居服員</td></tr>'}</tbody>
     </table></div>`;
     $$('[data-region]').forEach((b) => (b.onclick = () => { cgAuditState.region = b.dataset.region; draw(); }));
+    $('#cgaShowInactive').onchange = (e) => { cgAuditState.showInactive = e.target.checked; draw(); };
     $('#cgaQ').oninput = (e) => { cgAuditState.q = e.target.value; draw(); };
     $$('tr.click').forEach((tr) => (tr.onclick = () => { location.hash = `#/cgaudit/${tr.dataset.id}`; }));
   };
