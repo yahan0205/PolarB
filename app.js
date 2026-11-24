@@ -1435,53 +1435,58 @@ function resolveEffectiveVisitRecords(visits, batches) {
 // 忠實搬自 audit_engine.py 的 audit()：電訪每月、家訪每 3 個月（可提前、提前後
 // 重新起算）各自獨立判定，內容需 >30 字才算合格，casesByNid（現在來自「個案清單」
 // case_roster）是名單造冊標準。
-function auditCases(casesByNid, records, asOfMonth) {
-  const byCase = new Map();
-  const getCase = (nid) => {
-    if (!byCase.has(nid)) byCase.set(nid, { phone: new Map(), home: new Map(), name: '', phoneBlank: new Set(), homeBlank: new Set() });
-    return byCase.get(nid);
-  };
-  const trackLatest = (map, month, date) => {
-    if (!date) { if (!map.has(month)) map.set(month, null); return; }
-    const cur = map.get(month);
-    if (cur == null || date > cur) map.set(month, date);
-  };
-  for (const rec of records) {
-    const c = getCase(rec.national_id);
-    c.name = rec.name || c.name;
-    const hasContent = (rec.content_length || 0) > 30;
-    if (rec.is_phone_visit) {
-      if (hasContent) trackLatest(c.phone, rec.visit_month, rec.visit_date);
-      else c.phoneBlank.add(rec.visit_month);
-    }
-    if (rec.is_home_visit) {
-      if (hasContent) trackLatest(c.home, rec.visit_month, rec.visit_date);
-      else c.homeBlank.add(rec.visit_month);
-    }
-  }
-
-  const allIds = Object.keys(casesByNid);
+//
+// 同一人結案後重新開案（同一個身分證字號出現兩筆 case_roster，案號不同）時，
+// 訪視紀錄（rk_visits）本身只有身分證字號、沒有案號，沒辦法直接知道一筆訪視
+// 該算在哪一次服務期間名下。casesByNid 現在是「同一身分證字號底下的全部
+// case_roster 列」陣列，這裡先依每一列的服務期間（service_start_date ~
+// end_date，服務中/暫停視為持續到目前）切出時間窗，再把每一筆訪視紀錄依
+// visit_month 分配到「服務期間包含這個月份」的那一列；找不到對應窗口的
+// （理論上不該發生，資料缺漏或填錯時當保險）歸給服務期間起點離這個月份最近
+// 的那一列。這樣舊的結案紀錄跟新開的案子才不會共用同一份「最近一次家訪/
+// 電訪」，稽核結果依 case_roster 的列（c.id）分開計算、分開查詢，不再用身分
+// 證字號去查（身分證字號在重新開案的情況下不是唯一的）。
+function auditCases(rosterByNid, records, asOfMonth) {
   const logMonths = records.map((r) => r.visit_month);
   if (!logMonths.length) return { results: new Map(), logMinMonth: null, logMaxMonth: null, excludedCount: 0 };
   const logMinMonth = logMonths.reduce((a, b) => (a < b ? a : b));
   const logMaxRaw = logMonths.reduce((a, b) => (a > b ? a : b));
   const logMaxMonth = logMaxRaw < asOfMonth ? logMaxRaw : asOfMonth;
 
-  const rosterIds = new Set(allIds);
+  const recordsByNid = new Map();
+  for (const rec of records) {
+    if (!recordsByNid.has(rec.national_id)) recordsByNid.set(rec.national_id, []);
+    recordsByNid.get(rec.national_id).push(rec);
+  }
+
+  const rosterIds = new Set(rosterByNid.keys());
   const excludedCount = new Set(records.map((r) => r.national_id).filter((id) => !rosterIds.has(id))).size;
 
-  const results = new Map();
-  for (const nid of allIds) {
-    const info = casesByNid[nid];
-    const log = byCase.get(nid) || { phone: new Map(), home: new Map(), name: '', phoneBlank: new Set(), homeBlank: new Set() };
+  // 單一（roster 列, 這一列分配到的訪視紀錄）配對，算出跟原本一模一樣的每月
+  // 家訪/電訪狀態——這段邏輯完全沒改，只是從外層迴圈抽出來，每一筆 case_roster
+  // 列各自呼叫一次，不再是整個身分證字號共用一份。
+  const auditOneCase = (info, myRecords) => {
+    const phone = new Map(), home = new Map(), phoneBlank = new Set(), homeBlank = new Set();
+    let recName = '';
+    const trackLatest = (map, month, date) => {
+      if (!date) { if (!map.has(month)) map.set(month, null); return; }
+      const cur = map.get(month);
+      if (cur == null || date > cur) map.set(month, date);
+    };
+    for (const rec of myRecords) {
+      recName = rec.name || recName;
+      const hasContent = (rec.content_length || 0) > 30;
+      if (rec.is_phone_visit) { if (hasContent) trackLatest(phone, rec.visit_month, rec.visit_date); else phoneBlank.add(rec.visit_month); }
+      if (rec.is_home_visit) { if (hasContent) trackLatest(home, rec.visit_month, rec.visit_date); else homeBlank.add(rec.visit_month); }
+    }
 
-    const name = (info && info.name) || log.name || '(未知姓名)';
+    const name = (info && info.name) || recName || '(未知姓名)';
     const owner = (info && info.lead_supervisor) || '⚠ 個案清單未列名';
     const caseStartMonth = info ? monthOf(info.service_start_date) : null;
     const endMonth = info ? monthOf(info.end_date) : null;
     const statusNow = (info && info.status) || '';
 
-    if (statusNow === '結案' && endMonth && endMonth < logMinMonth) continue;
+    if (statusNow === '結案' && endMonth && endMonth < logMinMonth) return null;
 
     const preWindow = !!caseStartMonth && caseStartMonth < logMinMonth;
     const auditStart = caseStartMonth ? (caseStartMonth > logMinMonth ? caseStartMonth : logMinMonth) : logMinMonth;
@@ -1492,11 +1497,11 @@ function auditCases(casesByNid, records, asOfMonth) {
 
     const monthStatus = {};
     let lastHomeMonth = null;
-    for (const hm of log.home.keys()) { if (hm < auditStart && (lastHomeMonth === null || hm > lastHomeMonth)) lastHomeMonth = hm; }
+    for (const hm of home.keys()) { if (hm < auditStart && (lastHomeMonth === null || hm > lastHomeMonth)) lastHomeMonth = hm; }
 
     for (const m of months) {
-      const homeDone = log.home.has(m);
-      const phoneDone = log.phone.has(m);
+      const homeDone = home.has(m);
+      const phoneDone = phone.has(m);
       let homeState;
       if (homeDone) { homeState = '達標'; lastHomeMonth = m; }
       else if (lastHomeMonth === null) {
@@ -1506,7 +1511,7 @@ function auditCases(casesByNid, records, asOfMonth) {
         homeState = m >= dueMonth ? '逾期' : '未到期';
       }
       const phoneState = phoneDone ? '達標' : '缺漏';
-      monthStatus[m] = { 家訪: homeState, 電訪: phoneState, 家訪日期: log.home.get(m) || null, 電訪日期: log.phone.get(m) || null };
+      monthStatus[m] = { 家訪: homeState, 電訪: phoneState, 家訪日期: home.get(m) || null, 電訪日期: phone.get(m) || null };
     }
 
     let nextDue;
@@ -1515,20 +1520,49 @@ function auditCases(casesByNid, records, asOfMonth) {
     else nextDue = caseStartMonth || auditStart;
 
     const blankMonths = [
-      ...months.filter((m) => log.phoneBlank.has(m) && !log.phone.has(m)),
-      ...months.filter((m) => log.homeBlank.has(m) && !log.home.has(m)),
+      ...months.filter((m) => phoneBlank.has(m) && !phone.has(m)),
+      ...months.filter((m) => homeBlank.has(m) && !home.has(m)),
     ];
 
-    // lastHomeMonth 可能是 auditStart 之前的月份（資料範圍起點前就有的訪視，用來起算到期日），
-    // 這種情況下 monthStatus 裡不會有這個月份的資料；日期另外從 log.home 直接取，確保永遠拿得到。
-    const lastHomeDate = lastHomeMonth ? log.home.get(lastHomeMonth) : null;
-    results.set(nid, {
-      nationalId: nid, name, owner, caseNo: (info && info.case_no) || '',
+    const lastHomeDate = lastHomeMonth ? home.get(lastHomeMonth) : null;
+    return {
+      nationalId: info?.national_id, name, owner, caseNo: (info && info.case_no) || '',
       status: statusNow, inRoster: !!info,
       caseStartMonth: caseStartMonth || '未知', auditStart,
       preWindow, lastHomeMonth, lastHomeDate, nextDue,
       monthStatus, months, blankMonths, caseEndMonth,
+    };
+  };
+
+  const results = new Map();
+  for (const [nid, rows] of rosterByNid) {
+    const myRecords = recordsByNid.get(nid) || [];
+    if (rows.length === 1) {
+      const r = auditOneCase(rows[0], myRecords);
+      if (r) results.set(rows[0].id, r);
+      continue;
+    }
+    // 同一人有多筆 case_roster（結案後重新開案）：先算出每一列的服務期間窗口，
+    // 再把這個人的訪視紀錄依月份分配進對應的窗口，找不到窗口的就近分給服務
+    // 起始月最接近的那一列（通常是還在服務中、最新的那筆）。
+    const windows = rows.map((c) => {
+      const start = monthOf(c.service_start_date) || logMinMonth;
+      const end = (c.status === '結案' && c.end_date) ? monthOf(c.end_date) : logMaxMonth;
+      return { c, start, end: end && end < start ? start : end };
     });
+    // "YYYY-MM" 轉成總月數，方便算「離哪個窗口最近」的實際距離（localeCompare
+    // 只會回傳 -1/0/1，不能拿來當距離用）。
+    const monthNum = (mkey) => { const [y, m] = mkey.split('-').map(Number); return y * 12 + (m - 1); };
+    const perRow = new Map(windows.map((w) => [w.c.id, []]));
+    for (const rec of myRecords) {
+      const inWindow = windows.find((w) => rec.visit_month >= w.start && rec.visit_month <= w.end);
+      const chosen = inWindow || windows.reduce((best, w) => (!best || Math.abs(monthNum(w.start) - monthNum(rec.visit_month)) < Math.abs(monthNum(best.start) - monthNum(rec.visit_month)) ? w : best), null);
+      if (chosen) perRow.get(chosen.c.id).push(rec);
+    }
+    for (const w of windows) {
+      const r = auditOneCase(w.c, perRow.get(w.c.id) || []);
+      if (r) results.set(w.c.id, r);
+    }
   }
   return { results, logMinMonth, logMaxMonth, excludedCount };
 }
@@ -1564,8 +1598,10 @@ async function loadVisitAudit() {
   // 完全沒用到卻佔了絕大部分資料量，用 select 只抓需要的欄位可以大幅縮小下載量、加快載入。
   const allVisits = await db.all('rk_visits', { select: RK_VISITS_AUDIT_FIELDS });
   const effective = resolveEffectiveVisitRecords(allVisits, visitBatches);
-  const casesByNid = {};
-  for (const c of roster) if (c.national_id) casesByNid[c.national_id] = c;
+  // 同一身分證字號可能有多筆 case_roster（結案後重新開案），收集成陣列而不是
+  // 直接覆蓋，不然舊案子會憑空消失、新舊案子的訪視紀錄也會混在一起算。
+  const casesByNid = new Map();
+  for (const c of roster) { if (!c.national_id) continue; if (!casesByNid.has(c.national_id)) casesByNid.set(c.national_id, []); casesByNid.get(c.national_id).push(c); }
   const todayMonth = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
   const logMonths = effective.map((r) => r.visit_month);
   const asOfMonth = logMonths.length ? [...logMonths, todayMonth].reduce((a, b) => (a > b ? a : b)) : todayMonth;
@@ -1788,8 +1824,10 @@ async function loadCaseRosterBase() {
     db.all('unit_abbrs', {}),
     db.all('inquiries', { status: 'eq.成案', select: 'lead_staff_id,contract_date' }),
   ]);
-  const casesByNid = {};
-  for (const c of roster) if (c.national_id) casesByNid[c.national_id] = c;
+  // 同一身分證字號可能有多筆 case_roster（結案後重新開案），收集成陣列而不是
+  // 直接覆蓋，見 auditCases() 開頭的說明。
+  const casesByNid = new Map();
+  for (const c of roster) { if (!c.national_id) continue; if (!casesByNid.has(c.national_id)) casesByNid.set(c.national_id, []); casesByNid.get(c.national_id).push(c); }
   const unitLabel = makeUnitLabelResolver(abbrs, L.units);
   const todayMonth = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
   const latestVisitImportAt = visitBatches[0]?.imported_at || null;
@@ -1893,7 +1931,7 @@ function drawCaseRosterTable(box, data) {
   const sortIcon = (field) => caseRosterState.sortBy === field ? `<span class="small muted">${caseRosterState.sortDir === 'asc' ? '▲' : '▼'}</span>` : '';
   // 頁面最上方的家電訪統計摘要：不受下方篩選影響，永遠是（全體／個人／各督導）總覽，三種互相獨立。
   const lastStatusOf = (c) => {
-    const r = c.national_id ? audit.results.get(c.national_id) : null;
+    const r = audit.results.get(c.id);
     const lastMonth = r ? r.months[r.months.length - 1] : null;
     return lastMonth ? r.monthStatus[lastMonth] : null;
   };
@@ -1921,7 +1959,7 @@ function drawCaseRosterTable(box, data) {
       && (caseRosterState.status === '全部' || c.status === caseRosterState.status)
       && (!q || [c.name, c.national_id, c.case_no, c.lead_supervisor].some((x) => (x || '').toLowerCase().includes(q))));
     const rowsData = filtered.map((c) => {
-      const r = c.national_id ? audit.results.get(c.national_id) : null;
+      const r = audit.results.get(c.id);
       const lastMonth = r ? r.months[r.months.length - 1] : null;
       const st = lastMonth ? r.monthStatus[lastMonth] : null;
       return { c, r, st };
@@ -2050,8 +2088,10 @@ function drawCaseRosterTable(box, data) {
     };
     $$('[data-crow]').forEach((tr) => (tr.onclick = (e) => {
       if (e.target.closest('[data-ftoggle], [data-freview], [data-fbox]')) return;
-      const c = casesByNid[tr.dataset.crow] || roster.find((x) => String(x.id) === tr.dataset.cid);
-      openCaseDetailModal(c, c?.national_id ? audit.results.get(c.national_id) : null);
+      // 同一身分證字號可能對應多筆 case_roster（結案後重新開案），不能再用身分
+      // 證字號當查找捷徑（會對不到是哪一筆），改用每一列唯一的 id 直接找。
+      const c = roster.find((x) => String(x.id) === tr.dataset.cid);
+      openCaseDetailModal(c, audit.results.get(c.id));
     }));
     $$('[data-ftoggle]').forEach((b) => (b.onclick = async (e) => {
       e.stopPropagation();
