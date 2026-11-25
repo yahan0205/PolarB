@@ -2615,7 +2615,7 @@ async function drawUnitAbbrSection(box) {
 // 是不是自己＝主管交辦 vs 自己建立。範本（is_monthly=true）本身不是任務，不進
 // 四象限，另外收在「每月範本設定」區塊管理。見 sql/22_todos.sql 的完整設計說明。
 const todoRpc = (name, args) => rest('POST', `rpc/${name}`, { body: args || {} });
-let todoState = { showTemplates: false, viewStaffId: null };
+let todoState = { showTemplates: false, viewStaffId: null, q: '', expandedDone: {} };
 
 async function viewTodos() {
   // 管理者/主任可以切換「檢視某位督導」，看他身上被指派的所有待辦事項（不限
@@ -2627,6 +2627,7 @@ async function viewTodos() {
   $('#main').innerHTML = `
   <div class="head"><div><h1>待辦事項</h1><div class="muted small" style="margin-top:4px">${todoState.viewStaffId ? `正在檢視 ${esc(L.staffById[todoState.viewStaffId]?.name || '')} 的待辦事項（他建立的或被指派給他的）。` : '每月交辦與臨時待辦，主管與督導可以互相指派，只看得到自己建立或被指派的項目。'}</div></div>
     <div class="right">${viewOptions}<button type="button" class="btn primary" id="todoNew">＋ 新增待辦事項</button></div></div>
+  <div class="card filters" style="margin-bottom:16px"><input type="search" class="grow" id="todoQ" placeholder="搜尋標題、內容關鍵字" value="${esc(todoState.q)}" aria-label="搜尋"></div>
   <div id="todo-body"><p class="muted">載入中…</p></div>`;
   $('#todoNew').onclick = () => openTodoEditor(null, [], () => viewTodos());
   $('#todoViewStaff')?.addEventListener('change', (e) => { todoState.viewStaffId = e.target.value ? Number(e.target.value) : null; viewTodos(); });
@@ -2652,7 +2653,6 @@ async function viewTodos() {
   const unacked = todos.filter((t) => t.created_by_staff_id === me.id && t.status === '已完成' && !t.completed_ack_at);
 
   const templates = todos.filter((t) => t.is_monthly);
-  const actionable = todos.filter((t) => !t.is_monthly);
   const canVisit = (t) => isDirector() || t.created_by_staff_id === me.id || (assigneesByTodo[t.id] || []).includes(me.id);
   // 管理者選了「檢視某位督導」時，viewerId 換成那位督導，四象限的分類基準跟著換；
   // 同時只留下「跟那個人有關」的（他建立的，或指派給他的），不然會看到一堆完全
@@ -2666,15 +2666,6 @@ async function viewTodos() {
   // 這種情況代表這件事也是他自己要做的，不是單純丟給別人。只有「自己建立、指派
   // 名單裡完全沒有自己」才算純粹派出去的事項。
   const relevantToViewer = (t) => t.created_by_staff_id === viewerId || isAssignedToViewer(t);
-  const quadrant = (assignedBucket, monthly) => actionable.filter((t) =>
-    Boolean(t.source_template_id) === monthly && canVisit(t) && relevantToViewer(t)
-    && (assignedBucket ? isAssignedToViewer(t) : (t.created_by_staff_id === viewerId && !isAssignedToViewer(t))));
-  const quads = [
-    [`每月交辦（${viewingOther ? `${esc(viewerName)}被指派` : '被指派'}）`, quadrant(true, true)],
-    [`每月交辦（${viewingOther ? `${esc(viewerName)}指派出去` : '自己指派出去'}）`, quadrant(false, true)],
-    [`臨時待辦（${viewingOther ? `${esc(viewerName)}被指派` : '被指派'}）`, quadrant(true, false)],
-    [`臨時待辦（${viewingOther ? `${esc(viewerName)}指派出去` : '自己指派出去'}）`, quadrant(false, false)],
-  ];
 
   const renderRow = (t) => {
     const overdue = t.status === '待處理' && t.due_date && t.due_date < todayISO();
@@ -2693,70 +2684,115 @@ async function viewTodos() {
     </div>`;
   };
 
-  box.innerHTML = `
-  ${unacked.length ? `<div class="card" style="margin-bottom:16px;border-color:var(--ok)">
-    <h2 style="margin:0 0 8px">完成通知（${unacked.length}）</h2>
-    ${unacked.map((t) => `<div class="small" style="margin-bottom:6px">${esc(L.staffById[t.completed_by_staff_id]?.name || '（不明人員）')} 已完成你指派的「${esc(t.title)}」（${fmtTime(t.completed_at)}） <button type="button" class="link" data-tack="${t.id}">知道了</button></div>`).join('')}
-  </div>` : ''}
-  <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
-    ${quads.map(([label, rows]) => {
-      // 待處理跟已完成分開列，待處理永遠排前面，一眼就看得出還有什麼沒做完，
-      // 不用在同一份清單裡自己找哪些打勾了、哪些還沒有。
-      const pending = rows.filter((t) => t.status === '待處理');
-      const done = rows.filter((t) => t.status === '已完成');
-      return `<div class="card">
-      <h2 style="margin:0 0 10px">${label}（${rows.length}）</h2>
-      <h3 class="small muted" style="margin:0 0 8px">待處理（${pending.length}）</h3>
-      ${pending.length ? pending.map(renderRow).join('') : '<p class="muted small">目前沒有待處理的任務。</p>'}
-      <h3 class="small muted" style="margin:16px 0 8px">已完成（${done.length}）</h3>
-      ${done.length ? done.map(renderRow).join('') : '<p class="muted small">目前沒有已完成的任務。</p>'}
-    </div>`;
-    }).join('')}
-  </div>
-  <div class="card" style="margin-top:16px">
-    <div style="display:flex;justify-content:space-between;align-items:center">
-      <h2 style="margin:0">每月範本設定（${templates.length}）</h2>
-      <button type="button" class="btn small" id="todoTplToggle">${todoState.showTemplates ? '收合' : '展開'}</button>
-    </div>
-    ${todoState.showTemplates ? (templates.length ? templates.filter(canVisit).map((t) => `<div class="card" style="margin:10px 0 0">
-      <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap">
-        <div><strong>${esc(t.title)}</strong>${t.active ? '' : ' <span class="small muted">（已停用，不再產生新實例）</span>'}
-          <div class="small muted">每月 ${t.monthly_day ? `${t.monthly_day} 號` : '月底'} 到期；指派給：${esc(namesOf(t.id))}</div>
-        </div>
-        <div style="display:flex;gap:6px;flex-shrink:0">
-          <button type="button" class="btn small" data-tpltoggle="${t.id}">${t.active ? '停用' : '啟用'}</button>
-          <button type="button" class="btn small" data-tedit="${t.id}">編輯</button>
-          <button type="button" class="btn small" style="color:var(--bad)" data-tdel="${t.id}">刪除</button>
-        </div>
-      </div>
-    </div>`).join('') : '<p class="muted small" style="margin:10px 0 0">還沒有設定每月範本。</p>') : ''}
-  </div>`;
+  const DONE_COLLAPSED_COUNT = 5;
+  const drawTodoBody = () => {
+    const q = todoState.q.trim().toLowerCase();
+    // 搜尋關鍵字比對標題跟內容，沒有做分數排名，單純子字串比對，跟系統裡其他
+    // 搜尋框（問案列表、個案清單等）同一套簡單風格，不用額外猜排序邏輯。
+    const matchesQ = (t) => !q || t.title.toLowerCase().includes(q) || (t.content || '').toLowerCase().includes(q);
+    const actionable = todos.filter((t) => !t.is_monthly && matchesQ(t));
+    const quadrant = (assignedBucket, monthly) => actionable.filter((t) =>
+      Boolean(t.source_template_id) === monthly && canVisit(t) && relevantToViewer(t)
+      && (assignedBucket ? isAssignedToViewer(t) : (t.created_by_staff_id === viewerId && !isAssignedToViewer(t))));
+    const quads = [
+      ['monthly-assigned', `每月交辦（${viewingOther ? `${esc(viewerName)}被指派` : '被指派'}）`, quadrant(true, true)],
+      ['monthly-out', `每月交辦（${viewingOther ? `${esc(viewerName)}指派出去` : '自己指派出去'}）`, quadrant(false, true)],
+      ['adhoc-assigned', `臨時待辦（${viewingOther ? `${esc(viewerName)}被指派` : '被指派'}）`, quadrant(true, false)],
+      ['adhoc-out', `臨時待辦（${viewingOther ? `${esc(viewerName)}指派出去` : '自己指派出去'}）`, quadrant(false, false)],
+    ];
 
-  $('#todoTplToggle')?.addEventListener('click', () => { todoState.showTemplates = !todoState.showTemplates; viewTodos(); });
-  $$('[data-tack]').forEach((b) => (b.onclick = async () => {
-    try { await db.update('todos', Number(b.dataset.tack), { completed_ack_at: new Date().toISOString() }); refreshTodoAckCount(); viewTodos(); }
-    catch (e) { toast(e.message, true); }
-  }));
-  $$('[data-tcomplete]').forEach((b) => (b.onclick = async () => {
-    try { await todoRpc('complete_todo', { p_todo_id: Number(b.dataset.tcomplete) }); toast('已標記完成'); viewTodos(); }
-    catch (e) { toast(e.message, true); }
-  }));
-  $$('[data-treopen]').forEach((b) => (b.onclick = async () => {
-    try { await todoRpc('reopen_todo', { p_todo_id: Number(b.dataset.treopen) }); toast('已重新開啟'); viewTodos(); }
-    catch (e) { toast(e.message, true); }
-  }));
-  $$('[data-tpltoggle]').forEach((b) => (b.onclick = async () => {
-    const t = templates.find((x) => x.id === Number(b.dataset.tpltoggle));
-    try { await db.update('todos', t.id, { active: !t.active }); viewTodos(); } catch (e) { toast(e.message, true); }
-  }));
-  $$('[data-tedit]').forEach((b) => (b.onclick = () => {
-    const t = todos.find((x) => x.id === Number(b.dataset.tedit));
-    openTodoEditor(t, assigneesByTodo[t.id] || [], () => viewTodos());
-  }));
-  $$('[data-tdel]').forEach((b) => (b.onclick = async () => {
-    if (!(await confirmBox('確定要刪除這筆待辦事項嗎？無法復原（如果是每月範本，之後也不會再自動產生新的）。', '刪除', true))) return;
-    try { await db.remove('todos', Number(b.dataset.tdel)); toast('已刪除'); viewTodos(); } catch (e) { toast(e.message, true); }
-  }));
+    box.innerHTML = `
+    ${unacked.length ? `<div class="card" style="margin-bottom:16px;border-color:var(--ok)">
+      <h2 style="margin:0 0 8px">完成通知（${unacked.length}）</h2>
+      ${unacked.map((t) => `<div class="small" style="margin-bottom:6px">${esc(L.staffById[t.completed_by_staff_id]?.name || '（不明人員）')} 已完成你指派的「${esc(t.title)}」（${fmtTime(t.completed_at)}） <button type="button" class="link" data-tack="${t.id}">知道了</button></div>`).join('')}
+    </div>` : ''}
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
+      ${quads.map(([key, label, rows]) => {
+        // 待處理跟已完成分開列，待處理永遠排前面，一眼就看得出還有什麼沒做完。
+        // 已完成預設只顯示最近 5 筆（依完成時間新到舊排序），避免做完的事情越
+        // 堆越多，把真正要看的待處理清單擠到畫面下面，有需要再展開看全部。
+        const pending = rows.filter((t) => t.status === '待處理');
+        const done = rows.filter((t) => t.status === '已完成').sort((a, b) => (b.completed_at || '').localeCompare(a.completed_at || ''));
+        const expanded = Boolean(todoState.expandedDone[key]);
+        const doneShown = expanded ? done : done.slice(0, DONE_COLLAPSED_COUNT);
+        return `<div class="card">
+        <h2 style="margin:0 0 10px">${label}（${rows.length}）</h2>
+        <h3 class="small muted" style="margin:0 0 8px">待處理（${pending.length}）</h3>
+        ${pending.length ? pending.map(renderRow).join('') : '<p class="muted small">目前沒有待處理的任務。</p>'}
+        <h3 class="small muted" style="margin:16px 0 8px">已完成（${done.length}）</h3>
+        ${doneShown.length ? doneShown.map(renderRow).join('') : '<p class="muted small">目前沒有已完成的任務。</p>'}
+        ${done.length > DONE_COLLAPSED_COUNT ? `<button type="button" class="btn small" data-tdonetoggle="${key}">${expanded ? '收合' : `展開全部（${done.length}）`}</button>` : ''}
+      </div>`;
+      }).join('')}
+    </div>
+    <div class="card" style="margin-top:16px">
+      <div style="display:flex;justify-content:space-between;align-items:center">
+        <h2 style="margin:0">每月範本設定（${templates.length}）</h2>
+        <button type="button" class="btn small" id="todoTplToggle">${todoState.showTemplates ? '收合' : '展開'}</button>
+      </div>
+      ${todoState.showTemplates ? (templates.length ? templates.filter(canVisit).map((t) => `<div class="card" style="margin:10px 0 0">
+        <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap">
+          <div><strong>${esc(t.title)}</strong>${t.active ? '' : ' <span class="small muted">（已停用，不再產生新實例）</span>'}
+            <div class="small muted">每月 ${t.monthly_day ? `${t.monthly_day} 號` : '月底'} 到期；指派給：${esc(namesOf(t.id))}</div>
+          </div>
+          <div style="display:flex;gap:6px;flex-shrink:0">
+            <button type="button" class="btn small" data-tpltoggle="${t.id}">${t.active ? '停用' : '啟用'}</button>
+            <button type="button" class="btn small" data-tedit="${t.id}">編輯</button>
+            <button type="button" class="btn small" style="color:var(--bad)" data-tdel="${t.id}">刪除</button>
+          </div>
+        </div>
+      </div>`).join('') : '<p class="muted small" style="margin:10px 0 0">還沒有設定每月範本。</p>') : ''}
+    </div>`;
+
+    $('#todoTplToggle')?.addEventListener('click', () => { todoState.showTemplates = !todoState.showTemplates; drawTodoBody(); });
+    $$('[data-tdonetoggle]').forEach((b) => (b.onclick = () => { todoState.expandedDone[b.dataset.tdonetoggle] = !todoState.expandedDone[b.dataset.tdonetoggle]; drawTodoBody(); }));
+    $$('[data-tack]').forEach((b) => (b.onclick = async () => {
+      try { await db.update('todos', Number(b.dataset.tack), { completed_ack_at: new Date().toISOString() }); refreshTodoAckCount(); viewTodos(); }
+      catch (e) { toast(e.message, true); }
+    }));
+    $$('[data-tcomplete]').forEach((b) => (b.onclick = async () => {
+      try { await todoRpc('complete_todo', { p_todo_id: Number(b.dataset.tcomplete) }); toast('已標記完成'); viewTodos(); }
+      catch (e) { toast(e.message, true); }
+    }));
+    $$('[data-treopen]').forEach((b) => (b.onclick = async () => {
+      try { await todoRpc('reopen_todo', { p_todo_id: Number(b.dataset.treopen) }); toast('已重新開啟'); viewTodos(); }
+      catch (e) { toast(e.message, true); }
+    }));
+    $$('[data-tpltoggle]').forEach((b) => (b.onclick = async () => {
+      const t = templates.find((x) => x.id === Number(b.dataset.tpltoggle));
+      try { await db.update('todos', t.id, { active: !t.active }); viewTodos(); } catch (e) { toast(e.message, true); }
+    }));
+    $$('[data-tedit]').forEach((b) => (b.onclick = () => {
+      const t = todos.find((x) => x.id === Number(b.dataset.tedit));
+      openTodoEditor(t, assigneesByTodo[t.id] || [], () => viewTodos());
+    }));
+    $$('[data-tdel]').forEach((b) => (b.onclick = async () => {
+      if (!(await confirmBox('確定要刪除這筆待辦事項嗎？無法復原（如果是每月範本，之後也不會再自動產生新的）。', '刪除', true))) return;
+      try { await db.remove('todos', Number(b.dataset.tdel)); toast('已刪除'); viewTodos(); } catch (e) { toast(e.message, true); }
+    }));
+  };
+  // 中文注音/拼音輸入法組字期間先不重畫（不然選字選到一半畫面被打斷），等選字
+  // 完成才重畫；重畫完後把焦點、游標位置還原回搜尋框，跟「問案」「個案清單」
+  // 列表同一套處理方式。
+  const todoQ = $('#todoQ');
+  let todoQComposing = false;
+  const scheduleTodoQDraw = () => {
+    clearTimeout(drawTodoBody._t);
+    drawTodoBody._t = setTimeout(() => {
+      const cursor = todoQ.selectionStart;
+      drawTodoBody();
+      const i = $('#todoQ');
+      if (i) { i.focus(); i.setSelectionRange(cursor, cursor); }
+    }, 250);
+  };
+  todoQ.addEventListener('compositionstart', () => { todoQComposing = true; });
+  todoQ.addEventListener('compositionend', () => { todoQComposing = false; todoState.q = todoQ.value; scheduleTodoQDraw(); });
+  todoQ.oninput = (e) => {
+    todoState.q = e.target.value;
+    if (todoQComposing) return;
+    scheduleTodoQDraw();
+  };
+  drawTodoBody();
 }
 
 function openTodoEditor(t, currentAssigneeIds, afterDone) {
