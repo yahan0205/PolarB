@@ -1018,17 +1018,21 @@ function matchItem(m) {
 function drawMatchForm(inq, m) {
   const box = $('#mform-box');
   const cur = m || { contact_date: todayISO(), result: '拒絕', within_7km: true, reject_reason_ids: [] };
-  // 下拉選單裡「本區」「其他區」兩組，組內都改成依員編遞增排序（原本是依姓名排序），
-  // 方便知道員編的人直接用員編順序找人；沒有員編的排在最後面。
+  // 居服員欄位改成文字輸入＋datalist（跟「轉介單位」同一套做法）：瀏覽器會依
+  // 輸入的關鍵字自動比對清單裡最符合的選項（名字、員編都比對得到），不用再
+  // 從「本區／其他區」兩組下拉選單裡自己慢慢找，找人更快。本區排前面、其他
+  // 區排後面，都依員編遞增排序；沒有員編的排最後。目前已選的居服員（就算已
+  // 停用）一定會出現在清單裡，不會因為停用而讓既有紀錄顯示不出名字。
   const byCode = (a, b) => { if (!a.code && !b.code) return 0; if (!a.code) return 1; if (!b.code) return -1; return a.code < b.code ? -1 : a.code > b.code ? 1 : 0; };
   const cgs = L.cg.filter((c) => (c.active && (!c.region || c.region === inq.region)) || c.id === cur.caregiver_id).sort(byCode);
   const others = L.cg.filter((c) => c.active && c.region && c.region !== inq.region && c.id !== cur.caregiver_id).sort(byCode);
+  const cgLabel = (c) => `${c.code ? `${c.code} ` : ''}${c.name}${c.region ? `（${c.region}）` : ''}`;
+  const curCg = cur.caregiver_id ? [...cgs, ...others].find((c) => c.id === cur.caregiver_id) : null;
   box.innerHTML = `<form class="stack" id="mf" novalidate>
     <h2>${m ? `編輯媒合紀錄：${esc(m.caregiver_name)}` : '新增媒合紀錄'}</h2>
     <div class="grid2">
-      <label class="f">居服員 <span class="req">*</span><select name="caregiver_id">${opt('', '請選擇', cur.caregiver_id)}
-        <optgroup label="${esc(inq.region)}">${cgs.map((c) => opt(c.id, (c.code ? `${c.code} ` : '') + c.name, cur.caregiver_id)).join('')}</optgroup>
-        ${others.length ? `<optgroup label="其他區">${others.map((c) => opt(c.id, (c.code ? `${c.code} ` : '') + c.name, cur.caregiver_id)).join('')}</optgroup>` : ''}</select></label>
+      <label class="f">居服員 <span class="req">*</span><input type="text" name="caregiver_name" list="mf-cglist" autocomplete="off" value="${esc(curCg ? cgLabel(curCg) : '')}" placeholder="輸入姓名或員編搜尋">
+        <datalist id="mf-cglist">${[...cgs, ...others].map((c) => `<option value="${esc(cgLabel(c))}">`).join('')}</datalist></label>
       <label class="f">聯絡日期 <span class="req">*</span><input type="date" name="contact_date" value="${esc(cur.contact_date)}"></label>
     </div>
     <div style="display:flex;flex-wrap:wrap;gap:12px 32px">
@@ -1056,15 +1060,20 @@ function drawMatchForm(inq, m) {
     e.preventDefault();
     const er = $('#merr');
     const km = $('input[name=km]:checked', f)?.value;
+    // 居服員改成文字輸入後，存檔時用輸入的文字精確比對回 caregiver_id（跟「轉介
+    // 單位」同一套做法）；輸入的文字不在清單裡（打錯字、亂打）就當作沒選。
+    const cgByLabel = new Map([...cgs, ...others].map((c) => [cgLabel(c), c.id]));
+    const caregiverNameRaw = f.caregiver_name.value.trim();
+    const caregiver_id = caregiverNameRaw ? (cgByLabel.get(caregiverNameRaw) ?? null) : null;
     const body = {
-      caregiver_id: f.caregiver_id.value ? Number(f.caregiver_id.value) : null, contact_date: f.contact_date.value || null,
+      caregiver_id, contact_date: f.contact_date.value || null,
       within_7km: km === undefined ? null : km === '1', result: f.result.value,
       reject_reason_ids: f.result.value === '拒絕' ? $$('input[name=rj]:checked', f).map((x) => Number(x.value)) : [],
       reject_note: f.result.value === '拒絕' ? (f.reject_note.value.trim() || null) : null,
     };
     const otherChecked = $('input[name=rj][data-other="1"]', f)?.checked;
     const miss = [];
-    if (!body.caregiver_id) miss.push('居服員'); if (!body.contact_date) miss.push('聯絡日期');
+    if (!body.caregiver_id) miss.push(caregiverNameRaw ? '居服員（輸入的名字不在清單裡，請從建議選單選擇）' : '居服員'); if (!body.contact_date) miss.push('聯絡日期');
     if (body.within_7km === null) miss.push('7 公里內');
     if (body.result === '拒絕' && !body.reject_reason_ids.length) miss.push('拒絕原因');
     if (body.result === '拒絕' && otherChecked && !body.reject_note) miss.push('拒絕說明（勾選其他時必填）');
