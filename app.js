@@ -266,22 +266,27 @@ async function refreshJudgeCount() {
   drawNav();
 }
 
-// 待辦事項完成通知：交辦人（建立者）打開「待辦事項」頁面前，用這筆數字當
-// 導覽列的提醒徽章——別人已經完成、但我還沒讀過的待辦事項數量。
-let pendingTodoAck = 0;
-async function refreshTodoAckCount() {
+// 待辦事項導覽列紅字提醒：比照拒案判定的作法，統計「被交辦給自己、還沒處理完」
+// 的件數（不含每月範本本身，只算實際要做的事項），讓人一眼看出還有多少事沒做。
+let pendingMyTodos = 0;
+async function refreshMyTodoCount() {
   if (!me) return;
   try {
-    const rows = await db.all('todos', { select: 'id', created_by_staff_id: `eq.${me.id}`, status: 'eq.已完成', completed_ack_at: 'is.null' });
-    pendingTodoAck = rows.length;
-  } catch { pendingTodoAck = 0; }
+    const mine = await db.all('todo_assignees', { select: 'todo_id', staff_id: `eq.${me.id}`, order: 'todo_id' });
+    const ids = mine.map((a) => a.todo_id);
+    if (!ids.length) { pendingMyTodos = 0; }
+    else {
+      const rows = await db.all('todos', { select: 'id', id: `in.(${ids.join(',')})`, status: 'eq.待處理', is_monthly: 'eq.false' });
+      pendingMyTodos = rows.length;
+    }
+  } catch { pendingMyTodos = 0; }
   drawNav();
 }
 
 function drawNav() {
   const h = location.hash || '#/';
   const items = [['#/', '問案', /^#\/($|i\/|new)/], ['#/cases', '個案清單', /^#\/cases/], ['#/report', '派案紀錄', /^#\/report/], ['#/stats', '統計', /^#\/stats/], ['#/visitaudit', '家電訪稽核', /^#\/visitaudit/]];
-  items.push(['#/todos', `待辦事項${pendingTodoAck ? `<span class="badge-n">${pendingTodoAck}</span>` : ''}`, /^#\/todos/]);
+  items.push(['#/todos', `待辦事項${pendingMyTodos ? `<span class="badge-n">${pendingMyTodos}</span>` : ''}`, /^#\/todos/]);
   // 行政角色（clerk）權限只限結案箱年度，這個功能不開放給他看。
   if (!isArchiveClerk()) items.push(['#/cgaudit', '居服員稽核', /^#\/cgaudit/]);
   if (isDirector()) {
@@ -309,7 +314,7 @@ async function render() {
       main.innerHTML = `<div class="card login stack"><h1>帳號尚未啟用</h1><p>這個帳號還沒有連到人員名單，或已被停用。請聯絡管理者。</p><button type="button" class="btn" id="lo">登出</button></div>`;
       $('#lo').onclick = signOut; return;
     }
-    if (!L) { await loadLookups(); refreshJudgeCount(); refreshTodoAckCount(); }
+    if (!L) { await loadLookups(); refreshJudgeCount(); refreshMyTodoCount(); }
     $('#topbar').hidden = false; drawNav();
     const h = location.hash || '#/';
     let m;
@@ -2756,15 +2761,15 @@ async function viewTodos() {
     $('#todoTplToggle')?.addEventListener('click', () => { todoState.showTemplates = !todoState.showTemplates; drawTodoBody(); });
     $$('[data-tdonetoggle]').forEach((b) => (b.onclick = () => { todoState.expandedDone[b.dataset.tdonetoggle] = !todoState.expandedDone[b.dataset.tdonetoggle]; drawTodoBody(); }));
     $$('[data-tack]').forEach((b) => (b.onclick = async () => {
-      try { await db.update('todos', Number(b.dataset.tack), { completed_ack_at: new Date().toISOString() }); refreshTodoAckCount(); viewTodos(); }
+      try { await db.update('todos', Number(b.dataset.tack), { completed_ack_at: new Date().toISOString() }); viewTodos(); }
       catch (e) { toast(e.message, true); }
     }));
     $$('[data-tcomplete]').forEach((b) => (b.onclick = async () => {
-      try { await todoRpc('complete_todo', { p_todo_id: Number(b.dataset.tcomplete) }); toast('已標記完成'); viewTodos(); }
+      try { await todoRpc('complete_todo', { p_todo_id: Number(b.dataset.tcomplete) }); toast('已標記完成'); refreshMyTodoCount(); viewTodos(); }
       catch (e) { toast(e.message, true); }
     }));
     $$('[data-treopen]').forEach((b) => (b.onclick = async () => {
-      try { await todoRpc('reopen_todo', { p_todo_id: Number(b.dataset.treopen) }); toast('已重新開啟'); viewTodos(); }
+      try { await todoRpc('reopen_todo', { p_todo_id: Number(b.dataset.treopen) }); toast('已重新開啟'); refreshMyTodoCount(); viewTodos(); }
       catch (e) { toast(e.message, true); }
     }));
     $$('[data-tpltoggle]').forEach((b) => (b.onclick = async () => {
@@ -2777,7 +2782,7 @@ async function viewTodos() {
     }));
     $$('[data-tdel]').forEach((b) => (b.onclick = async () => {
       if (!(await confirmBox('確定要刪除這筆待辦事項嗎？無法復原（如果是每月範本，之後也不會再自動產生新的）。', '刪除', true))) return;
-      try { await db.remove('todos', Number(b.dataset.tdel)); toast('已刪除'); viewTodos(); } catch (e) { toast(e.message, true); }
+      try { await db.remove('todos', Number(b.dataset.tdel)); toast('已刪除'); refreshMyTodoCount(); viewTodos(); } catch (e) { toast(e.message, true); }
     }));
   };
   // 中文注音/拼音輸入法組字期間先不重畫（不然選字選到一半畫面被打斷），等選字
@@ -2867,6 +2872,7 @@ function openTodoEditor(t, currentAssigneeIds, afterDone) {
         }
         await db.insertMany('todo_assignees', assigneeIds.map((staff_id) => ({ todo_id: id, staff_id })));
         toast(isEdit ? '已儲存' : '已建立待辦事項');
+        refreshMyTodoCount();
         close(); afterDone?.();
       } catch (e) { er.textContent = e.message; er.hidden = false; btn.disabled = false; }
     };
