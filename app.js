@@ -2654,20 +2654,26 @@ async function viewTodos() {
   const templates = todos.filter((t) => t.is_monthly);
   const actionable = todos.filter((t) => !t.is_monthly);
   const canVisit = (t) => isDirector() || t.created_by_staff_id === me.id || (assigneesByTodo[t.id] || []).includes(me.id);
-  // 管理者選了「檢視某位督導」時，viewerId 換成那位督導，四象限的分類基準
-  // （誰建立的）跟著換；同時只留下「跟那個人有關」的（他建立的，或指派給他的），
-  // 不然會看到一堆完全不相干的任務。
+  // 管理者選了「檢視某位督導」時，viewerId 換成那位督導，四象限的分類基準跟著換；
+  // 同時只留下「跟那個人有關」的（他建立的，或指派給他的），不然會看到一堆完全
+  // 不相干的任務。
   const viewerId = todoState.viewStaffId || me.id;
   const viewingOther = Boolean(todoState.viewStaffId);
   const viewerName = viewingOther ? (L.staffById[viewerId]?.name || '未知') : null;
-  const relevantToViewer = (t) => t.created_by_staff_id === viewerId || (assigneesByTodo[t.id] || []).includes(viewerId);
-  const quadrant = (fromOthers, monthly) => actionable.filter((t) =>
-    Boolean(t.source_template_id) === monthly && (t.created_by_staff_id !== viewerId) === fromOthers && canVisit(t) && relevantToViewer(t));
+  const isAssignedToViewer = (t) => (assigneesByTodo[t.id] || []).includes(viewerId);
+  // 分類基準改成「有沒有指派給檢視對象自己」，不是單純看「誰建立的」：自己建立、
+  // 但指派對象裡也包含自己（或檢視對象自己）的任務，算「被指派」，不算「派出去」——
+  // 這種情況代表這件事也是他自己要做的，不是單純丟給別人。只有「自己建立、指派
+  // 名單裡完全沒有自己」才算純粹派出去的事項。
+  const relevantToViewer = (t) => t.created_by_staff_id === viewerId || isAssignedToViewer(t);
+  const quadrant = (assignedBucket, monthly) => actionable.filter((t) =>
+    Boolean(t.source_template_id) === monthly && canVisit(t) && relevantToViewer(t)
+    && (assignedBucket ? isAssignedToViewer(t) : (t.created_by_staff_id === viewerId && !isAssignedToViewer(t))));
   const quads = [
-    [`每月交辦（${viewingOther ? '別人交辦' : '主管交辦'}）`, quadrant(true, true)],
-    [`每月交辦（${viewingOther ? `${esc(viewerName)}建立` : '自己建立'}）`, quadrant(false, true)],
-    [`臨時待辦（${viewingOther ? '別人交辦' : '主管交辦'}）`, quadrant(true, false)],
-    [`臨時待辦（${viewingOther ? `${esc(viewerName)}建立` : '自己建立'}）`, quadrant(false, false)],
+    [`每月交辦（${viewingOther ? `${esc(viewerName)}被指派` : '被指派'}）`, quadrant(true, true)],
+    [`每月交辦（${viewingOther ? `${esc(viewerName)}指派出去` : '自己指派出去'}）`, quadrant(false, true)],
+    [`臨時待辦（${viewingOther ? `${esc(viewerName)}被指派` : '被指派'}）`, quadrant(true, false)],
+    [`臨時待辦（${viewingOther ? `${esc(viewerName)}指派出去` : '自己指派出去'}）`, quadrant(false, false)],
   ];
 
   const renderRow = (t) => {
@@ -2693,10 +2699,19 @@ async function viewTodos() {
     ${unacked.map((t) => `<div class="small" style="margin-bottom:6px">${esc(L.staffById[t.completed_by_staff_id]?.name || '（不明人員）')} 已完成你指派的「${esc(t.title)}」（${fmtTime(t.completed_at)}） <button type="button" class="link" data-tack="${t.id}">知道了</button></div>`).join('')}
   </div>` : ''}
   <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px">
-    ${quads.map(([label, rows]) => `<div class="card">
+    ${quads.map(([label, rows]) => {
+      // 待處理跟已完成分開列，待處理永遠排前面，一眼就看得出還有什麼沒做完，
+      // 不用在同一份清單裡自己找哪些打勾了、哪些還沒有。
+      const pending = rows.filter((t) => t.status === '待處理');
+      const done = rows.filter((t) => t.status === '已完成');
+      return `<div class="card">
       <h2 style="margin:0 0 10px">${label}（${rows.length}）</h2>
-      ${rows.length ? rows.map(renderRow).join('') : '<p class="muted small">目前沒有任務。</p>'}
-    </div>`).join('')}
+      <h3 class="small muted" style="margin:0 0 8px">待處理（${pending.length}）</h3>
+      ${pending.length ? pending.map(renderRow).join('') : '<p class="muted small">目前沒有待處理的任務。</p>'}
+      <h3 class="small muted" style="margin:16px 0 8px">已完成（${done.length}）</h3>
+      ${done.length ? done.map(renderRow).join('') : '<p class="muted small">目前沒有已完成的任務。</p>'}
+    </div>`;
+    }).join('')}
   </div>
   <div class="card" style="margin-top:16px">
     <div style="display:flex;justify-content:space-between;align-items:center">
