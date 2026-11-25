@@ -1480,6 +1480,14 @@ function auditCases(rosterByNid, records, asOfMonth) {
   // 家訪/電訪狀態——這段邏輯完全沒改，只是從外層迴圈抽出來，每一筆 case_roster
   // 列各自呼叫一次，不再是整個身分證字號共用一份。
   const auditOneCase = (info, myRecords) => {
+    // 結案當月不套用「內容字數要超過30字」的門檻：結案電訪/家訪本來就常常
+    // 只是簡短寫「個案表示恢復良好，已無需居家服務，故予以結案」這類結案說明，
+    // 字數門檻的設計初衷是過濾平時隨便填寫的訪視紀錄，不是要讓結案說明也被
+    // 擋下來誤判成缺漏——只要結案當月確實有填寫紀錄，不論長短都算達標。
+    const endMonth = info ? monthOf(info.end_date) : null;
+    const statusNow = (info && info.status) || '';
+    const isClosingMonth = statusNow === '結案' && endMonth;
+
     const phone = new Map(), home = new Map(), phoneBlank = new Set(), homeBlank = new Set();
     let recName = '';
     const trackLatest = (map, month, date) => {
@@ -1489,7 +1497,7 @@ function auditCases(rosterByNid, records, asOfMonth) {
     };
     for (const rec of myRecords) {
       recName = rec.name || recName;
-      const hasContent = (rec.content_length || 0) > 30;
+      const hasContent = (rec.content_length || 0) > 30 || (isClosingMonth && rec.visit_month === endMonth);
       if (rec.is_phone_visit) { if (hasContent) trackLatest(phone, rec.visit_month, rec.visit_date); else phoneBlank.add(rec.visit_month); }
       if (rec.is_home_visit) { if (hasContent) trackLatest(home, rec.visit_month, rec.visit_date); else homeBlank.add(rec.visit_month); }
     }
@@ -1497,8 +1505,6 @@ function auditCases(rosterByNid, records, asOfMonth) {
     const name = (info && info.name) || recName || '(未知姓名)';
     const owner = (info && info.lead_supervisor) || '⚠ 個案清單未列名';
     const caseStartMonth = info ? monthOf(info.service_start_date) : null;
-    const endMonth = info ? monthOf(info.end_date) : null;
-    const statusNow = (info && info.status) || '';
 
     if (statusNow === '結案' && endMonth && endMonth < logMinMonth) return null;
 
