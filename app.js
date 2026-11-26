@@ -1887,7 +1887,10 @@ async function viewCases() {
   }
 }
 
-const caseRosterState = { owner: '全部', unit: '全部', status: '全部', onlyIssues: false, q: '', sortBy: null, sortDir: 'asc', statsCollapsed: false };
+// 預設排序改成「案號遞減」（最新的案子排最前面）：之前沒指定排序時用的是
+// 資料庫回傳的原始順序，剛好接近「依 id 遞增」，結果每次打開都固定從最舊
+// 的案子開始列，看起來像卡住不動——督導實際上比較常需要看最新的案子。
+const caseRosterState = { owner: '全部', unit: '全部', status: '全部', onlyIssues: false, q: '', sortBy: 'case_no', sortDir: 'desc', statsCollapsed: false };
 
 // 個案清單欄位顯示設定：案號／姓名一定顯示，其他欄位可以勾選隱藏。設定記在這台電腦
 // 的瀏覽器、依登入帳號分開（跟新北 A 個管系統那套邏輯一樣），不影響其他同仁、也不會
@@ -1992,7 +1995,10 @@ function drawCaseRosterTable(box, data) {
         if (av == null && bv == null) return 0;
         if (av == null) return 1;  // 空值固定排最後，不受正逆排序影響
         if (bv == null) return -1;
-        const c = String(av).localeCompare(String(bv));
+        // 加 numeric:true，不然案號「VIP2」「VIP10」會被當成純文字排序，
+        // 排出「VIP10」在「VIP2」前面這種反直覺的順序（字串比較逐字元比對，
+        // '1' 小於 '2'）。
+        const c = String(av).localeCompare(String(bv), undefined, { numeric: true });
         return caseRosterState.sortDir === 'desc' ? -c : c;
       });
     }
