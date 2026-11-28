@@ -236,11 +236,12 @@ async function loadMe() {
 }
 
 async function loadLookups() {
-  const [units, nc, rj, cond, sc, cg, staff] = await Promise.all([
+  const [units, nc, rj, cond, sc, cg, staff, permGrants] = await Promise.all([
     db.all('referral_units', { order: 'sort,name' }), db.all('nc_reasons', { order: 'sort,name' }),
     db.all('reject_reasons', { order: 'sort,name' }), db.all('special_conditions', { order: 'sort,name' }),
     db.all('service_codes', { order: 'sort,name' }),
     db.all('caregivers', { order: 'name' }), db.all('staff', { order: 'code,name' }),
+    db.all('staff_permission_grants', { select: 'staff_id,permission_key' }),
   ]);
   const byId = (a) => Object.fromEntries(a.map((x) => [x.id, x]));
   // 督導下拉選單順序：先新莊（依員編）、後淡水（依員編），跟 REGIONS 的區域順序一致；
@@ -250,7 +251,13 @@ async function loadLookups() {
     return (ra < 0 ? 99 : ra) - (rb < 0 ? 99 : rb) || (a.code || '').localeCompare(b.code || '') || a.name.localeCompare(b.name);
   });
   L = { units, nc, rj, cond, sc, cg, staff, unitById: byId(units), ncById: byId(nc), rjById: byId(rj), condById: byId(cond), scById: byId(sc), cgById: byId(cg), staffById: byId(staff) };
+  // 通用業務權限：{staff_id}:{permission_key} 這種字串組成 Set，之後要加其他業務的
+  // 授權判斷，程式裡只要多寫一個 permission_key 字串，不用改資料結構。
+  L.permSet = new Set(permGrants.map((g) => `${g.staff_id}:${g.permission_key}`));
 }
+// 主任/管理者一律視為有任何業務權限（跟資料庫端 is_director() 的判斷一致），
+// 不用特別幫他們在 staff_permission_grants 裡勾選。
+const hasPerm = (key, staffId = me?.id) => isDirector() || (staffId != null && L.permSet?.has(`${staffId}:${key}`));
 
 // 下拉選單：只列啟用中的，但目前已選的值即使停用也保留
 const activeOr = (list, cur) => list.filter((x) => x.active || String(x.id) === String(cur ?? ''));
@@ -289,6 +296,7 @@ function drawNav() {
   items.push(['#/todos', `待辦事項${pendingMyTodos ? `<span class="badge-n">${pendingMyTodos}</span>` : ''}`, /^#\/todos/]);
   // 行政角色（clerk）權限只限結案箱年度，這個功能不開放給他看。
   if (!isArchiveClerk()) items.push(['#/cgaudit', '居服員稽核', /^#\/cgaudit/]);
+  if (!isArchiveClerk()) items.push(['#/cgsup', '個督檢核', /^#\/cgsup/]);
   if (isDirector()) {
     items.push(['#/judge', `拒案判定${pendingJudge ? `<span class="badge-n">${pendingJudge}</span>` : ''}`, /^#\/judge/]);
     items.push(['#/synclog', '同步紀錄', /^#\/synclog/]);
@@ -328,6 +336,8 @@ async function render() {
     else if (h === '#/todos') await viewTodos();
     else if (h === '#/cgaudit' && !isArchiveClerk()) await viewCaregiverAuditList();
     else if ((m = h.match(/^#\/cgaudit\/(\d+)$/)) && !isArchiveClerk()) await viewCaregiverAuditDetail(Number(m[1]));
+    else if (h === '#/cgsup' && !isArchiveClerk()) await viewCgSupervisionList();
+    else if ((m = h.match(/^#\/cgsup\/(\d+)$/)) && !isArchiveClerk()) await viewCgSupervisionDetail(Number(m[1]));
     else if (h === '#/cases') await viewCases();
     else if (h === '#/report') await viewReport();
     else if (h === '#/stats') await viewStats();
@@ -2546,21 +2556,26 @@ const ADMIN_TABS = {
   rj: { label: '拒絕原因', table: 'reject_reasons' }, cond: { label: '特殊條件', table: 'special_conditions' },
   sc: { label: '碼別', table: 'service_codes' },
   cg: { label: '居服員', table: 'caregivers' }, staff: { label: '督導與帳號', table: 'staff' },
+  perm: { label: '業務權限' },
 };
 async function viewAdmin(tab) {
   if (tab === 'rotation' && isAdmin()) return viewRotationAdmin();
+  if (tab === 'perm') return viewBusinessPermAdmin();
   if (!ADMIN_TABS[tab]) tab = 'units';
   const T = ADMIN_TABS[tab];
   const rows = await db.all(T.table, { order: tab === 'cg' || tab === 'staff' ? 'active.desc,code,name' : 'active.desc,sort,name' });
   const isOpt = !['cg', 'staff', 'sc'].includes(tab);
   const regionSel = (name, cur) => `<select name="${name}">${opt('', '—', cur)}${REGIONS.map((r) => opt(r, r, cur)).join('')}</select>`;
   const roleSel = (cur) => `<select name="role">${[['supervisor', '督導'], ['director', '主任'], ['admin', '管理者'], ['clerk', '行政']].map(([v, l]) => opt(v, l, cur)).join('')}</select>`;
+  // 主責居督下拉：列出在職、非行政角色的人員，跟家電訪稽核「主責督導」篩選
+  // 用同一個條件（有設定區域的人，涵蓋兼任區域督導工作的管理者）。
+  const leadSupSel = (cur) => `<select name="lead_supervisor_staff_id">${opt('', '—', cur || '')}${L.staff.filter((s) => s.active && s.role !== 'clerk' && s.region).map((s) => opt(s.id, s.name, cur || '')).join('')}</select>`;
   const head = isOpt ? '<th>名稱</th><th style="width:110px">排序</th>'
     : tab === 'sc' ? '<th style="width:110px">代碼</th><th>名稱</th><th style="width:110px">排序</th>'
-      : tab === 'cg' ? '<th style="width:130px">員編</th><th>姓名</th><th style="width:130px">區域</th>' : '<th style="width:130px">員編</th><th>姓名</th><th style="width:130px">區域</th><th style="width:130px">角色</th><th>登入帳號</th>';
+      : tab === 'cg' ? '<th style="width:130px">員編</th><th>姓名</th><th style="width:130px">區域</th><th style="width:130px">到職日</th><th style="width:130px">離職日</th><th style="width:140px">主責居督</th>' : '<th style="width:130px">員編</th><th>姓名</th><th style="width:130px">區域</th><th style="width:130px">角色</th><th>登入帳號</th>';
   const cells = (r) => isOpt ? `<td><input type="text" name="name" value="${esc(r.name)}" aria-label="名稱"></td><td><input type="number" name="sort" value="${r.sort}" aria-label="排序"></td>`
     : tab === 'sc' ? `<td><input type="text" name="code" value="${esc(r.code || '')}" aria-label="代碼"></td><td><input type="text" name="name" value="${esc(r.name)}" aria-label="名稱"></td><td><input type="number" name="sort" value="${r.sort}" aria-label="排序"></td>`
-      : tab === 'cg' ? `<td><input type="text" name="code" value="${esc(r.code || '')}" aria-label="員編"></td><td><input type="text" name="name" value="${esc(r.name)}" aria-label="姓名"></td><td>${regionSel('region', r.region)}</td>`
+      : tab === 'cg' ? `<td><input type="text" name="code" value="${esc(r.code || '')}" aria-label="員編"></td><td><input type="text" name="name" value="${esc(r.name)}" aria-label="姓名"></td><td>${regionSel('region', r.region)}</td><td><input type="date" name="hire_date" value="${esc(r.hire_date || '')}" aria-label="到職日"></td><td><input type="date" name="resign_date" value="${esc(r.resign_date || '')}" aria-label="離職日"></td><td>${leadSupSel(r.lead_supervisor_staff_id)}</td>`
         : `<td><input type="text" name="code" value="${esc(r.code || '')}" aria-label="員編"></td><td><input type="text" name="name" value="${esc(r.name)}" aria-label="姓名"></td><td>${regionSel('region', r.region)}</td><td>${roleSel(r.role)}</td><td class="small">${
             r.user_id
               ? `已連結${isDirector() ? ` <button type="button" class="link" data-acct="reset" data-id="${r.id}">重設密碼</button>` : ''}${isAdmin() ? ` <button type="button" class="link" style="color:var(--bad)" data-acct="delete" data-id="${r.id}">刪除帳號</button>` : ''}`
@@ -2586,7 +2601,11 @@ async function viewAdmin(tab) {
     const b = { name: $('[name=name]', tr).value.trim(), active: $('[name=active]', tr).checked };
     if (isOpt || tab === 'sc') b.sort = Number($('[name=sort]', tr).value) || 0;
     if (tab === 'sc') b.code = $('[name=code]', tr).value.trim() || null;
-    if (tab === 'cg') { b.code = $('[name=code]', tr).value.trim() || null; b.region = $('[name=region]', tr).value || null; }
+    if (tab === 'cg') {
+      b.code = $('[name=code]', tr).value.trim() || null; b.region = $('[name=region]', tr).value || null;
+      b.hire_date = $('[name=hire_date]', tr).value || null; b.resign_date = $('[name=resign_date]', tr).value || null;
+      b.lead_supervisor_staff_id = Number($('[name=lead_supervisor_staff_id]', tr).value) || null;
+    }
     if (tab === 'staff') { b.code = $('[name=code]', tr).value.trim() || null; b.region = $('[name=region]', tr).value || null; b.role = $('[name=role]', tr).value; }
     return b;
   };
@@ -2631,6 +2650,50 @@ async function viewAdmin(tab) {
     }
   }));
   if (tab === 'units') await drawUnitAbbrSection($('#ua-extra'));
+}
+
+// 「業務權限」：通用的業務授權表（staff_permission_grants），目前只有一項
+// 「個督紙本勾稽」，之後若有其他業務也要分權限，直接在 BUSINESS_PERMISSIONS
+// 這個清單加一筆即可，不用動資料庫結構。只有管理者（isAdmin，不含主任）能
+// 勾選/取消——跟 RLS 的 insert/delete 政策一致；主任看得到這頁但勾選框停用，
+// 方便知道目前授權狀況，但不能自己改。
+const BUSINESS_PERMISSIONS = [
+  { key: 'cg_supervision_paper_check', label: '個督紙本勾稽' },
+];
+async function viewBusinessPermAdmin() {
+  const [staff, grants] = await Promise.all([
+    db.all('staff', { active: 'eq.true', order: 'code,name' }),
+    db.all('staff_permission_grants', {}),
+  ]);
+  const grantSet = new Set(grants.map((g) => `${g.staff_id}:${g.permission_key}`));
+  const canEdit = isAdmin();
+  $('#main').innerHTML = `
+  <h1>管理</h1>
+  <nav class="tabs" aria-label="管理項目">${Object.entries(ADMIN_TABS).map(([k, v]) => `<a href="#/admin/${k}" class="${k === 'perm' ? 'on' : ''}">${v.label}</a>`).join('')}${isAdmin() ? '<a href="#/admin/rotation">輪接</a>' : ''}</nav>
+  <div class="muted small" style="margin:10px 0 16px">指派特定業務的管理權限給同仁，不分區域限制；主任與管理者不受此表限制，一律可操作全部業務。${canEdit ? '' : '　<span style="color:var(--warn)">只有管理者能修改這份授權清單。</span>'}</div>
+  <div class="tbox"><table class="t">
+    <thead><tr><th>員編</th><th>姓名</th><th>角色</th>${BUSINESS_PERMISSIONS.map((p) => `<th>${esc(p.label)}</th>`).join('')}</tr></thead>
+    <tbody>${staff.map((s) => `<tr data-sid="${s.id}">
+      <td class="nowrap">${esc(s.code || '')}</td><td>${esc(s.name)}</td><td>${esc({ supervisor: '督導', director: '主任', admin: '管理者', clerk: '行政' }[s.role] || s.role)}</td>
+      ${BUSINESS_PERMISSIONS.map((p) => `<td><input type="checkbox" data-perm="${p.key}" ${grantSet.has(`${s.id}:${p.key}`) ? 'checked' : ''} ${canEdit ? '' : 'disabled'}></td>`).join('')}
+    </tr>`).join('') || '<tr><td colspan="99" class="empty">沒有在職人員</td></tr>'}</tbody>
+  </table></div>`;
+  if (canEdit) $$('[data-perm]').forEach((cb) => (cb.onchange = async () => {
+    const staffId = Number(cb.closest('tr').dataset.sid);
+    const key = cb.dataset.perm;
+    cb.disabled = true;
+    try {
+      if (cb.checked) await db.insert('staff_permission_grants', { staff_id: staffId, permission_key: key, granted_by: me.id });
+      else {
+        // 不信任頁面載入當下那份舊的 grants 陣列（同一次頁面停留可能勾了又取消好幾次，
+        // 陣列裡不會有剛剛才新增的那筆），改成即時查一次目前的實際 id 再刪除。
+        const rows = await db.all('staff_permission_grants', { staff_id: `eq.${staffId}`, permission_key: `eq.${key}` });
+        if (rows[0]) await db.remove('staff_permission_grants', rows[0].id);
+      }
+      await loadLookups(); toast('已更新');
+    } catch (e) { toast(e.message, true); cb.checked = !cb.checked; }
+    cb.disabled = false;
+  }));
 }
 
 // 「轉介單位」管理頁的附加區塊：A單位縮寫（個案清單用）。轉介單位名稱本身就是短、
@@ -3100,6 +3163,257 @@ function openCgAuditEditor(cg, r, afterDone) {
         toast(isEdit ? '已儲存' : '已建立');
         close(); afterDone?.();
       } catch (e) { er.textContent = e.message; er.hidden = false; btn.disabled = false; }
+    };
+  });
+}
+
+/* ================= 個督檢核 ================= */
+// 取代原本單機作業的「個督檢核表.html」，排程演算法（新制/舊制、逐次個督的
+// 應辦區間）直接照搬那份工具的邏輯，只是輸入來源換成資料庫（caregivers 的
+// 到職日/離職日 + caregiver_supervisions 的個督完成紀錄），不是 localStorage。
+//
+// ROC（民國）月份用「總月數」（年*12+月）表示方便算區間，跟家電訪稽核的
+// monthNum() 是同樣的手法。
+const rocTotalMonth = (iso) => { if (!iso) return null; const y = rocYear(iso); const m = Number(iso.slice(5, 7)); return y * 12 + m; };
+const rocMonthKeyOf = (total) => { const y = Math.floor((total - 1) / 12); const m = total - y * 12; return `${y}/${String(m).padStart(2, '0')}`; };
+const CG_SUP_NEW_RULE_FROM = 115 * 12 + 6; // 115年6月起到職適用新制
+const isCgSupNewRule = (hireTotal) => hireTotal >= CG_SUP_NEW_RULE_FROM;
+
+// 舊制：到職後 1、2、3 個月各一次，接著第 6 個月一次，之後每半年一次。
+// 新制：到職後次月一次，之後每半年一次。
+function cgSupIntervals(isNew) {
+  return Array.from({ length: 50 }, (_, i) => (isNew ? (i === 0 ? 1 : 6) : (i === 0 ? 1 : i === 1 ? 1 : i === 2 ? 1 : i === 3 ? 3 : 6)));
+}
+
+// doneRows：這個人全部的 caregiver_supervisions 紀錄（含紙本勾稽狀態）。
+function evaluateCgSupervisions(cg, doneRows) {
+  const hireTotal = rocTotalMonth(cg.hire_date);
+  if (!hireTotal) return { slots: [], extraDone: [], hireTotal: null };
+  const isNew = isCgSupNewRule(hireTotal);
+  const intervals = cgSupIntervals(isNew);
+
+  const doneByMonth = new Map();
+  for (const r of doneRows) doneByMonth.set(r.roc_year * 12 + r.roc_month, r);
+  const doneMos = [...doneByMonth.keys()].sort((a, b) => a - b);
+
+  const todayIso = todayISO();
+  const nowTotal = rocYear(todayIso) * 12 + Number(todayIso.slice(5, 7));
+  const resignTotal = rocTotalMonth(cg.resign_date);
+  const effNowTotal = resignTotal ? Math.min(nowTotal, resignTotal) : nowTotal;
+  const limitTotal = resignTotal || effNowTotal + 12; // 沒離職的話，最多預先列到一年後
+
+  const slots = [];
+  const usedDone = new Set();
+  let prevTotal = hireTotal;
+  for (let i = 0; i < intervals.length; i++) {
+    const dueBy = prevTotal + intervals[i];
+    if (dueBy > limitTotal) break;
+    let found = null;
+    for (const mo of doneMos) { if (!usedDone.has(mo) && mo > prevTotal && mo <= dueBy) { found = mo; usedDone.add(mo); break; } }
+    const pastDue = dueBy <= effNowTotal;
+    slots.push({
+      seq: i + 1, dueByTotal: dueBy, windowStartTotal: prevTotal + 1,
+      doneTotal: found, doneRow: found ? doneByMonth.get(found) : null,
+      done: Boolean(found), overdue: pastDue && !found, dueThisMonth: dueBy === effNowTotal && !found,
+      future: dueBy > effNowTotal,
+    });
+    prevTotal = found || dueBy;
+    if (prevTotal > limitTotal) break;
+  }
+  const extraDone = doneMos.filter((mo) => !usedDone.has(mo)).map((mo) => doneByMonth.get(mo));
+  return { slots, extraDone, hireTotal, isNew };
+}
+
+function cgSupStats(cg, doneRows) {
+  const { slots } = evaluateCgSupervisions(cg, doneRows);
+  let total = 0, completed = 0, overdue = 0, dueNow = 0;
+  for (const s of slots) { if (s.future) continue; total++; if (s.done) completed++; else if (s.overdue) overdue++; else if (s.dueThisMonth) dueNow++; }
+  const lastDone = [...doneRows].sort((a, b) => (b.roc_year * 12 + b.roc_month) - (a.roc_year * 12 + a.roc_month))[0] || null;
+  const paperDue = doneRows.filter((r) => !r.paper_submitted).length;
+  return { total, completed, overdue, dueNow, ok: overdue === 0, lastDone, paperDue };
+}
+
+let cgSupState = { region: null, status: 'all', supervisor: '全部', onlyPaperDue: false, q: '' };
+const canRecordCgSup = (cg) => canEditCgAudit(cg);
+const canCheckCgSupPaper = () => hasPerm('cg_supervision_paper_check');
+
+async function viewCgSupervisionList() {
+  if (cgSupState.region === null) cgSupState.region = me.region || '全部';
+  $('#main').innerHTML = '<p class="muted">載入中…</p>';
+  let allSup;
+  try { allSup = await db.all('caregiver_supervisions', {}); }
+  catch (e) { $('#main').innerHTML = `<div class="card"><p class="err-text">${esc(e.message)}</p></div>`; return; }
+  const byCg = new Map();
+  for (const r of allSup) { if (!byCg.has(r.caregiver_id)) byCg.set(r.caregiver_id, []); byCg.get(r.caregiver_id).push(r); }
+
+  const draw = () => {
+    const q = cgSupState.q.trim().toLowerCase();
+    const rows = L.cg.filter((c) => (cgSupState.region === '全部' || c.region === cgSupState.region)
+      && (cgSupState.status === 'resigned' ? Boolean(c.resign_date) : !c.resign_date)
+      && (cgSupState.supervisor === '全部' || L.staffById[c.lead_supervisor_staff_id]?.name === cgSupState.supervisor)
+      && (!q || c.name.toLowerCase().includes(q) || (c.code || '').toLowerCase().includes(q)))
+      .map((c) => ({ c, stats: cgSupStats(c, byCg.get(c.id) || []) }))
+      .filter(({ stats }) => {
+        if (cgSupState.onlyPaperDue && stats.paperDue === 0) return false;
+        if (cgSupState.status === 'overdue') return stats.overdue > 0;
+        if (cgSupState.status === 'due') return stats.dueNow > 0;
+        if (cgSupState.status === 'ok') return stats.ok;
+        return true;
+      });
+
+    const allRows = L.cg.filter((c) => !c.resign_date).map((c) => cgSupStats(c, byCg.get(c.id) || []));
+    const totalPaperDue = allRows.reduce((s, x) => s + x.paperDue, 0);
+    const supervisors = [...new Set(L.cg.map((c) => L.staffById[c.lead_supervisor_staff_id]?.name).filter(Boolean))].sort();
+
+    $('#main').innerHTML = `
+    <div class="head"><div><h1>個督檢核</h1><div class="muted small" style="margin-top:4px">追蹤每位居服員的個別督導辦理狀況，督導只能記錄自己負責區域的居服員。</div></div></div>
+    <div class="card" style="margin-bottom:16px">
+      <div style="display:flex;flex-wrap:wrap;gap:16px 40px">
+        <div><div class="small muted">居服員人數</div><div style="font-size:26px;font-weight:700">${allRows.length}</div></div>
+        <div><div class="small muted">符合規定</div><div style="font-size:26px;font-weight:700;color:var(--ok)">${allRows.filter((x) => x.ok).length}</div></div>
+        <div><div class="small muted">有逾期未辦</div><div style="font-size:26px;font-weight:700;color:var(--bad)">${allRows.filter((x) => x.overdue > 0).length}</div></div>
+        <div><div class="small muted">本月應辦</div><div style="font-size:26px;font-weight:700;color:var(--warn)">${allRows.filter((x) => x.dueNow > 0).length}</div></div>
+        <div><div class="small muted">紙本未繳</div><div style="font-size:26px;font-weight:700;color:var(--bad)">${totalPaperDue}</div></div>
+      </div>
+    </div>
+    <div class="card filters">
+      <div class="seg" role="group" aria-label="區域">${['全部', ...REGIONS].map((r) => `<button type="button" data-cgsregion="${r}" class="${cgSupState.region === r ? 'on' : ''}">${r}</button>`).join('')}</div>
+      <div class="pills">
+        ${[['all', '全部'], ['overdue', '⚠ 有逾期'], ['due', '📅 本月應辦'], ['ok', '✓ 符合規定'], ['resigned', '離職']].map(([k, l]) => `<button type="button" data-cgsstatus="${k}" class="${cgSupState.status === k ? 'on' : ''}">${l}</button>`).join('')}
+      </div>
+      <select id="cgsSupSel"><option value="全部">全部主責居督</option>${supervisors.map((s) => opt(s, s, cgSupState.supervisor)).join('')}</select>
+      <label class="inline-check"><input type="checkbox" id="cgsPaperDue" ${cgSupState.onlyPaperDue ? 'checked' : ''}>只顯示紙本未繳${totalPaperDue ? ` <span class="st" style="background:var(--bad-bg);color:var(--bad)">${totalPaperDue}</span>` : ''}</label>
+      <input type="search" class="grow" id="cgsQ" placeholder="搜尋姓名、員編" value="${esc(cgSupState.q)}">
+    </div>
+    <div class="muted small" style="margin-bottom:8px">共 ${rows.length} 筆</div>
+    <div class="tbox"><table class="t roster">
+      <thead><tr><th>員編</th><th>姓名</th><th>區域</th><th>主責居督</th><th>到職日</th><th>狀態</th><th>已完成/應辦</th><th>最近一次個督</th><th>紙本未繳</th></tr></thead>
+      <tbody>${rows.map(({ c, stats }) => {
+        const badge = !c.hire_date ? '<span class="faint small">尚未設定到職日</span>'
+          : stats.overdue > 0 ? `<span class="st r-拒絕">⚠ 逾期 ${stats.overdue} 次</span>`
+          : stats.dueNow > 0 ? '<span class="st s-問案中">📅 本月應辦</span>'
+          : '<span class="st s-成案">✓ 符合規定</span>';
+        return `<tr class="click" data-id="${c.id}">
+          <td class="nowrap">${esc(c.code || '')}</td><td>${esc(c.name)}</td><td>${esc(c.region || '')}</td>
+          <td>${esc(L.staffById[c.lead_supervisor_staff_id]?.name || '')}</td>
+          <td class="nowrap">${c.hire_date ? fmtDate(c.hire_date) : '<span class="faint">未設定</span>'}</td>
+          <td>${c.resign_date ? '<span class="st" style="background:#ECEDEB;color:#4A524F">🚪 已離職</span>' : badge}</td>
+          <td class="num">${stats.completed}／${stats.total}</td>
+          <td class="nowrap">${stats.lastDone ? `${stats.lastDone.roc_year}/${String(stats.lastDone.roc_month).padStart(2, '0')}` : '<span class="faint">尚無紀錄</span>'}</td>
+          <td class="num">${stats.paperDue ? `<span class="st" style="background:var(--bad-bg);color:var(--bad)">${stats.paperDue} 筆</span>` : '—'}</td>
+        </tr>`;
+      }).join('') || '<tr><td colspan="9" class="empty">沒有符合條件的居服員</td></tr>'}</tbody>
+    </table></div>`;
+
+    $$('[data-cgsregion]').forEach((b) => (b.onclick = () => { cgSupState.region = b.dataset.cgsregion; draw(); }));
+    $$('[data-cgsstatus]').forEach((b) => (b.onclick = () => { cgSupState.status = b.dataset.cgsstatus; draw(); }));
+    $('#cgsSupSel').onchange = (e) => { cgSupState.supervisor = e.target.value; draw(); };
+    $('#cgsPaperDue').onchange = (e) => { cgSupState.onlyPaperDue = e.target.checked; draw(); };
+    $('#cgsQ').oninput = (e) => { cgSupState.q = e.target.value; draw(); };
+    $$('tr.click').forEach((tr) => (tr.onclick = () => { location.hash = `#/cgsup/${tr.dataset.id}`; }));
+  };
+  draw();
+}
+
+async function viewCgSupervisionDetail(cgId) {
+  const cg = L.cgById[cgId];
+  if (!cg) { $('#main').innerHTML = '<div class="card empty">找不到這位居服員。</div>'; return; }
+  const canRecord = canRecordCgSup(cg);
+  const canPaper = canCheckCgSupPaper();
+  $('#main').innerHTML = `
+  <a href="#/cgsup" class="small" style="text-decoration:none">← 回個督檢核列表</a>
+  <div class="head" style="margin-top:10px"><div><h1>${esc(cg.name)}</h1><div class="muted small" style="margin-top:4px">${esc(cg.code || '')}　${esc(cg.region || '')}　主責居督：${esc(L.staffById[cg.lead_supervisor_staff_id]?.name || '—')}　到職：${cg.hire_date ? fmtDate(cg.hire_date) : '未設定'}${cg.resign_date ? `　<span style="color:var(--warn)">離職：${fmtDate(cg.resign_date)}</span>` : ''}${canRecord ? '' : '　<span style="color:var(--warn)">非本區，唯讀</span>'}</div></div>
+    <div class="right">${canRecord ? '<button type="button" class="btn primary" id="cgsNew">＋ 記錄個督</button>' : ''}</div></div>
+  <div id="cgs-body"><p class="muted">載入中…</p></div>`;
+  const box = $('#cgs-body');
+  if (!cg.hire_date) { box.innerHTML = '<div class="card empty">這位居服員還沒有設定到職日，無法計算個督排程。請到「管理 → 居服員」設定。</div>'; if (canRecord) $('#cgsNew').disabled = true; return; }
+  let rows;
+  try { rows = await db.all('caregiver_supervisions', { caregiver_id: `eq.${cgId}`, order: 'roc_year.desc,roc_month.desc' }); }
+  catch (e) { box.innerHTML = `<div class="card"><p class="err-text">${esc(e.message)}</p></div>`; return; }
+
+  const refresh = () => viewCgSupervisionDetail(cgId);
+  $('#cgsNew')?.addEventListener('click', () => openCgSupRecordModal(cg, null, refresh));
+
+  const { slots, extraDone } = evaluateCgSupervisions(cg, rows);
+  const paperChip = (r) => r.paper_submitted
+    ? `<span class="tag" style="background:var(--ok-bg);color:var(--ok)">紙本已繳交</span>`
+    : canPaper
+      ? `<button type="button" class="btn small" data-cgspaper="${r.id}">標記紙本已繳</button>`
+      : `<span class="tag" style="background:var(--warn-bg);color:var(--warn)">紙本未繳</span>`;
+  const slotHtml = slots.map((s) => {
+    let cls, result, action;
+    if (s.done) {
+      cls = 'done'; result = `✓ 已於 ${rocMonthKeyOf(s.doneTotal)} 辦理`;
+      action = paperChip(s.doneRow);
+    } else if (s.overdue) {
+      cls = 'overdue'; result = '⚠ 逾期未辦';
+      action = canRecord ? `<button type="button" class="btn small danger" data-cgsrecord="${s.dueByTotal}">記錄個督</button>` : '';
+    } else if (s.dueThisMonth) {
+      cls = 'due'; result = '📅 本月應辦';
+      action = canRecord ? `<button type="button" class="btn small" data-cgsrecord="${s.dueByTotal}">記錄個督</button>` : '';
+    } else {
+      cls = 'future'; result = `應於 ${rocMonthKeyOf(s.dueByTotal)} 前辦理`;
+      action = '<button type="button" class="btn small" disabled>未到期</button>';
+    }
+    return `<div class="slot-row ${cls}" style="display:flex;align-items:center;gap:12px;padding:10px 14px;border-radius:8px;margin-bottom:6px;flex-wrap:wrap;background:${cls === 'done' ? 'var(--ok-bg)' : cls === 'overdue' ? 'var(--bad-bg)' : cls === 'due' ? 'var(--warn-bg)' : 'var(--chip)'}">
+      <span style="font-weight:600;min-width:56px">第 ${s.seq} 次</span>
+      <span class="muted" style="min-width:150px">應於 ${rocMonthKeyOf(s.dueByTotal)} 前</span>
+      <span style="flex:1;font-weight:500">${result}</span>
+      ${action}
+    </div>`;
+  }).join('');
+
+  box.innerHTML = `
+  <div class="card"><h2 style="margin:0 0 12px">個督時間軸</h2>
+    ${slots.length ? slotHtml : '<p class="muted small">目前無應辦個督。</p>'}
+  </div>
+  ${extraDone.length ? `<div class="card" style="margin-top:16px"><h2 style="margin:0 0 10px">不定期個督</h2>
+    ${extraDone.map((r) => `<div class="chip" style="margin-bottom:6px">${r.roc_year}/${String(r.roc_month).padStart(2, '0')}${r.paper_submitted ? '' : '　<span style="color:var(--warn)">紙本未繳</span>'}</div>`).join('')}
+  </div>` : ''}`;
+
+  $$('[data-cgsrecord]').forEach((b) => (b.onclick = () => {
+    const total = Number(b.dataset.cgsrecord);
+    const y = Math.floor((total - 1) / 12), m = total - y * 12;
+    openCgSupRecordModal(cg, { roc_year: y, roc_month: m }, refresh);
+  }));
+  $$('[data-cgspaper]').forEach((b) => (b.onclick = async () => {
+    try { await db.update('caregiver_supervisions', Number(b.dataset.cgspaper), { paper_submitted: true, paper_submitted_at: new Date().toISOString(), paper_submitted_by_staff_id: me.id }); toast('已標記紙本已繳交'); refresh(); }
+    catch (e) { toast(e.message, true); }
+  }));
+}
+
+function openCgSupRecordModal(cg, prefill, afterDone) {
+  const thisRocYear = new Date().getFullYear() - 1911;
+  const y0 = prefill?.roc_year || thisRocYear, m0 = prefill?.roc_month || (new Date().getMonth() + 1);
+  modal(`<h2>記錄個督：${esc(cg.name)}</h2>
+    <div class="stack">
+      <div class="grid2">
+        <label class="f">完成年度 <span class="req">*</span><input type="number" name="roc_year" value="${y0}" min="100" max="150"></label>
+        <label class="f">完成月份 <span class="req">*</span><input type="number" name="roc_month" value="${m0}" min="1" max="12"></label>
+      </div>
+      <label class="f spanall">備註<textarea name="note" style="min-height:70px"></textarea></label>
+      ${canCheckCgSupPaper() ? '<label class="inline-check"><input type="checkbox" name="paper_submitted">紙本已繳交</label>' : ''}
+      <p class="err-text" id="cgsmerr" hidden></p>
+    </div>
+    <div class="acts"><button type="button" class="btn" data-no>取消</button><button type="button" class="btn primary" data-yes>記錄</button></div>`,
+  (m, close) => {
+    $('[data-no]', m).onclick = close;
+    $('[data-yes]', m).onclick = async () => {
+      const er = $('#cgsmerr', m); er.hidden = true;
+      const roc_year = Number($('[name=roc_year]', m).value), roc_month = Number($('[name=roc_month]', m).value);
+      if (!roc_year || roc_year < 100 || roc_year > 150) { er.textContent = '請填寫正確的民國年份'; er.hidden = false; return; }
+      if (!roc_month || roc_month < 1 || roc_month > 12) { er.textContent = '請填寫正確的月份（1–12）'; er.hidden = false; return; }
+      const paperChecked = $('[name=paper_submitted]', m)?.checked;
+      const body = {
+        caregiver_id: cg.id, roc_year, roc_month, note: $('[name=note]', m).value.trim() || null,
+        created_by_staff_id: me.id,
+        ...(paperChecked ? { paper_submitted: true, paper_submitted_at: new Date().toISOString(), paper_submitted_by_staff_id: me.id } : {}),
+      };
+      const btn = $('[data-yes]', m); btn.disabled = true;
+      try {
+        await db.insert('caregiver_supervisions', body);
+        toast('已記錄個督'); close(); afterDone?.();
+      } catch (e) { er.textContent = /duplicate|unique/.test(e.message) ? '這個月份已經有個督紀錄了' : e.message; er.hidden = false; btn.disabled = false; }
     };
   });
 }
