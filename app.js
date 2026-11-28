@@ -236,12 +236,16 @@ async function loadMe() {
 }
 
 async function loadLookups() {
-  const [units, nc, rj, cond, sc, cg, staff, permGrants] = await Promise.all([
+  const [units, nc, rj, cond, sc, cg, staff, permGrants, pagePerms] = await Promise.all([
     db.all('referral_units', { order: 'sort,name' }), db.all('nc_reasons', { order: 'sort,name' }),
     db.all('reject_reasons', { order: 'sort,name' }), db.all('special_conditions', { order: 'sort,name' }),
     db.all('service_codes', { order: 'sort,name' }),
     db.all('caregivers', { order: 'name' }), db.all('staff', { order: 'code,name' }),
     db.all('staff_permission_grants', { select: 'staff_id,permission_key' }),
+    // role_page_permissions 是複合主鍵（role, page_key），沒有 id 欄位，db.all()
+    // 沒指定 order 時預設的「id 遊標分頁」用不了，一定要指定 order（跟
+    // todo_assignees 踩過同一個坑）。
+    db.all('role_page_permissions', { order: 'role' }),
   ]);
   const byId = (a) => Object.fromEntries(a.map((x) => [x.id, x]));
   // 督導下拉選單順序：先新莊（依員編）、後淡水（依員編），跟 REGIONS 的區域順序一致；
@@ -254,7 +258,15 @@ async function loadLookups() {
   // 通用業務權限：{staff_id}:{permission_key} 這種字串組成 Set，之後要加其他業務的
   // 授權判斷，程式裡只要多寫一個 permission_key 字串，不用改資料結構。
   L.permSet = new Set(permGrants.map((g) => `${g.staff_id}:${g.permission_key}`));
+  // 頁面可見性矩陣：{role}:{page_key} → visible，以角色為單位，跟上面的業務權限
+  // （以個人為單位）是兩種不同性質的授權，刻意分開存放。查無資料列（理論上不該
+  // 發生，migration 已經把現有行為全部 seed 進去）時預設可見，不要因為資料庫
+  // 一時查不到就把整個導覽列擋光。
+  L.pagePermMap = new Map(pagePerms.map((p) => [`${p.role}:${p.page_key}`, p.visible]));
 }
+// 這個角色看不看得到某個頁面：查矩陣，查無資料時預設可見（fail-open，避免
+// migration 還沒跑完或資料列意外缺漏時擋住所有人進不去任何頁面）。
+const canSeePage = (pageKey) => { const v = L.pagePermMap?.get(`${me?.role}:${pageKey}`); return v !== false; };
 // 主任/管理者一律視為有任何業務權限（跟資料庫端 is_director() 的判斷一致），
 // 不用特別幫他們在 staff_permission_grants 裡勾選。
 const hasPerm = (key, staffId = me?.id) => isDirector() || (staffId != null && L.permSet?.has(`${staffId}:${key}`));
@@ -292,16 +304,23 @@ async function refreshMyTodoCount() {
 
 function drawNav() {
   const h = location.hash || '#/';
-  const items = [['#/', '問案', /^#\/($|i\/|new)/], ['#/cases', '個案清單', /^#\/cases/], ['#/report', '派案紀錄', /^#\/report/], ['#/stats', '統計', /^#\/stats/], ['#/visitaudit', '家電訪稽核', /^#\/visitaudit/]];
-  items.push(['#/todos', `待辦事項${pendingMyTodos ? `<span class="badge-n">${pendingMyTodos}</span>` : ''}`, /^#\/todos/]);
-  // 行政角色（clerk）權限只限結案箱年度，這個功能不開放給他看。
-  if (!isArchiveClerk()) items.push(['#/cgaudit', '居服員稽核', /^#\/cgaudit/]);
-  if (!isArchiveClerk()) items.push(['#/cgsup', '個督檢核', /^#\/cgsup/]);
-  if (isDirector()) {
-    items.push(['#/judge', `拒案判定${pendingJudge ? `<span class="badge-n">${pendingJudge}</span>` : ''}`, /^#\/judge/]);
-    items.push(['#/synclog', '同步紀錄', /^#\/synclog/]);
-    items.push(['#/admin', '管理', /^#\/admin/]);
-  }
+  // 每個頁面的可見性改成查「頁面權限」矩陣（以角色為單位，管理頁面可調整），
+  // 不再是寫死判斷角色；頁面裡面的細部操作權限（只有管理者能刪帳號之類）
+  // 完全不受這裡影響，繼續維持原本寫死在各自功能裡的判斷。
+  const allItems = [
+    ['inquiries', '#/', '問案', /^#\/($|i\/|new)/],
+    ['cases', '#/cases', '個案清單', /^#\/cases/],
+    ['report', '#/report', '派案紀錄', /^#\/report/],
+    ['stats', '#/stats', '統計', /^#\/stats/],
+    ['visitaudit', '#/visitaudit', '家電訪稽核', /^#\/visitaudit/],
+    ['todos', '#/todos', `待辦事項${pendingMyTodos ? `<span class="badge-n">${pendingMyTodos}</span>` : ''}`, /^#\/todos/],
+    ['cgaudit', '#/cgaudit', '居服員稽核', /^#\/cgaudit/],
+    ['cgsup', '#/cgsup', '個督檢核', /^#\/cgsup/],
+    ['judge', '#/judge', `拒案判定${pendingJudge ? `<span class="badge-n">${pendingJudge}</span>` : ''}`, /^#\/judge/],
+    ['synclog', '#/synclog', '同步紀錄', /^#\/synclog/],
+    ['admin', '#/admin', '管理', /^#\/admin/],
+  ];
+  const items = allItems.filter(([key]) => canSeePage(key)).map(([, href, label, re]) => [href, label, re]);
   $('#nav').innerHTML = items.map(([href, label, re]) => `<a href="${href}" class="${re.test(h) ? 'on' : ''}">${label}</a>`).join('');
   $('#whoami').textContent = me ? `${me.name}${me.region ? ' · ' + me.region : ''}${isDirector() ? ' · ' + (me.role === 'admin' ? '管理者' : '主任') : isArchiveClerk() ? ' · 行政' : ''}` : '';
 }
@@ -326,23 +345,26 @@ async function render() {
     $('#topbar').hidden = false; drawNav();
     const h = location.hash || '#/';
     let m;
-    if (h === '#/' || h === '#' || h === '') await viewList();
-    else if (h === '#/new') await viewForm(null);
-    else if ((m = h.match(/^#\/i\/(\d+)\/edit(?:\?status=(.+))?$/))) await viewForm(Number(m[1]), m[2] ? decodeURIComponent(m[2]) : null);
-    else if ((m = h.match(/^#\/i\/(\d+)$/))) await viewDetail(Number(m[1]));
-    else if (h === '#/judge' && isDirector()) await viewJudge();
-    else if (h === '#/synclog' && isDirector()) await viewSyncLog();
-    else if (h === '#/visitaudit') await viewVisitAudit();
-    else if (h === '#/todos') await viewTodos();
-    else if (h === '#/cgaudit' && !isArchiveClerk()) await viewCaregiverAuditList();
-    else if ((m = h.match(/^#\/cgaudit\/(\d+)$/)) && !isArchiveClerk()) await viewCaregiverAuditDetail(Number(m[1]));
-    else if (h === '#/cgsup' && !isArchiveClerk()) await viewCgSupervisionList();
-    else if ((m = h.match(/^#\/cgsup\/(\d+)$/)) && !isArchiveClerk()) await viewCgSupervisionDetail(Number(m[1]));
-    else if (h === '#/cases') await viewCases();
-    else if (h === '#/report') await viewReport();
-    else if (h === '#/stats') await viewStats();
+    // 頁面可見性查「頁面權限」矩陣（canSeePage），跟導覽列用同一套判斷，不要
+    // 讓人直接打網址繞過導覽列沒顯示的限制。#/admin/rotation 刻意額外多一層
+    // isAdmin() 寫死檢查，不受矩陣影響——輪接設定是故意不開放彈性調整的。
+    if ((h === '#/' || h === '#' || h === '') && canSeePage('inquiries')) await viewList();
+    else if (h === '#/new' && canSeePage('inquiries')) await viewForm(null);
+    else if ((m = h.match(/^#\/i\/(\d+)\/edit(?:\?status=(.+))?$/)) && canSeePage('inquiries')) await viewForm(Number(m[1]), m[2] ? decodeURIComponent(m[2]) : null);
+    else if ((m = h.match(/^#\/i\/(\d+)$/)) && canSeePage('inquiries')) await viewDetail(Number(m[1]));
+    else if (h === '#/judge' && canSeePage('judge')) await viewJudge();
+    else if (h === '#/synclog' && canSeePage('synclog')) await viewSyncLog();
+    else if (h === '#/visitaudit' && canSeePage('visitaudit')) await viewVisitAudit();
+    else if (h === '#/todos' && canSeePage('todos')) await viewTodos();
+    else if (h === '#/cgaudit' && canSeePage('cgaudit')) await viewCaregiverAuditList();
+    else if ((m = h.match(/^#\/cgaudit\/(\d+)$/)) && canSeePage('cgaudit')) await viewCaregiverAuditDetail(Number(m[1]));
+    else if (h === '#/cgsup' && canSeePage('cgsup')) await viewCgSupervisionList();
+    else if ((m = h.match(/^#\/cgsup\/(\d+)$/)) && canSeePage('cgsup')) await viewCgSupervisionDetail(Number(m[1]));
+    else if (h === '#/cases' && canSeePage('cases')) await viewCases();
+    else if (h === '#/report' && canSeePage('report')) await viewReport();
+    else if (h === '#/stats' && canSeePage('stats')) await viewStats();
     else if (h === '#/admin/rotation' && isAdmin()) await viewRotationAdmin();
-    else if ((m = h.match(/^#\/admin(?:\/(\w+))?$/)) && isDirector()) await viewAdmin(m[1] || 'units');
+    else if ((m = h.match(/^#\/admin(?:\/(\w+))?$/)) && canSeePage('admin')) await viewAdmin(m[1] || 'units');
     else main.innerHTML = '<div class="card empty">找不到這個頁面。<a href="#/">回問案列表</a></div>';
   } catch (e) {
     if (e instanceof AuthError) { render(); return; }
@@ -2556,10 +2578,11 @@ const ADMIN_TABS = {
   rj: { label: '拒絕原因', table: 'reject_reasons' }, cond: { label: '特殊條件', table: 'special_conditions' },
   sc: { label: '碼別', table: 'service_codes' },
   cg: { label: '居服員', table: 'caregivers' }, staff: { label: '督導與帳號', table: 'staff' },
-  perm: { label: '業務權限' },
+  pageperm: { label: '頁面權限' }, perm: { label: '業務權限' },
 };
 async function viewAdmin(tab) {
   if (tab === 'rotation' && isAdmin()) return viewRotationAdmin();
+  if (tab === 'pageperm') return viewPagePermAdmin();
   if (tab === 'perm') return viewBusinessPermAdmin();
   if (!ADMIN_TABS[tab]) tab = 'units';
   const T = ADMIN_TABS[tab];
@@ -2657,6 +2680,44 @@ async function viewAdmin(tab) {
     }
   }));
   if (tab === 'units') await drawUnitAbbrSection($('#ua-extra'));
+}
+
+// 「頁面權限」：以角色為單位的頁面可見性矩陣（role_page_permissions），只控制
+// 「這個角色看不看得到、進不進得去某個頁面」，不碰頁面裡面寫死的細部操作權限
+// （只有管理者能刪帳號、只有主任能跨區編輯那些，繼續維持原樣，不受這裡影響）。
+// PAGE_LIST 要跟 drawNav()／render() 路由裡用的 page_key 保持一致，新增頁面時
+// 兩邊都要記得加。
+const PAGE_LIST = [
+  { key: 'inquiries', label: '問案' }, { key: 'cases', label: '個案清單' }, { key: 'report', label: '派案紀錄' },
+  { key: 'stats', label: '統計' }, { key: 'visitaudit', label: '家電訪稽核' }, { key: 'todos', label: '待辦事項' },
+  { key: 'cgaudit', label: '居服員稽核' }, { key: 'cgsup', label: '個督檢核' }, { key: 'judge', label: '拒案判定' },
+  { key: 'synclog', label: '同步紀錄' }, { key: 'admin', label: '管理' },
+];
+const PAGE_PERM_ROLES = [['supervisor', '督導'], ['director', '主任'], ['admin', '管理者'], ['clerk', '行政']];
+async function viewPagePermAdmin() {
+  const rows = await db.all('role_page_permissions', { order: 'role' });
+  const visMap = new Map(rows.map((r) => [`${r.role}:${r.page_key}`, r.visible]));
+  const canEdit = isAdmin();
+  $('#main').innerHTML = `
+  <h1>管理</h1>
+  <nav class="tabs" aria-label="管理項目">${Object.entries(ADMIN_TABS).map(([k, v]) => `<a href="#/admin/${k}" class="${k === 'pageperm' ? 'on' : ''}">${v.label}</a>`).join('')}${isAdmin() ? '<a href="#/admin/rotation">輪接</a>' : ''}</nav>
+  <div class="muted small" style="margin:10px 0 16px">設定每個角色在導覽列能不能看到、能不能進入某個頁面；頁面裡面原本的細部操作權限（例如只有管理者能刪帳號）不受這裡影響。${canEdit ? '' : '　<span style="color:var(--warn)">只有管理者能修改這份設定。</span>'}</div>
+  <div class="tbox"><table class="t">
+    <thead><tr><th>頁面</th>${PAGE_PERM_ROLES.map(([, l]) => `<th>${l}</th>`).join('')}</tr></thead>
+    <tbody>${PAGE_LIST.map((p) => `<tr data-page="${p.key}">
+      <td>${esc(p.label)}</td>
+      ${PAGE_PERM_ROLES.map(([role]) => `<td><input type="checkbox" data-role="${role}" ${visMap.get(`${role}:${p.key}`) !== false ? 'checked' : ''} ${canEdit ? '' : 'disabled'}></td>`).join('')}
+    </tr>`).join('')}</tbody>
+  </table></div>`;
+  if (canEdit) $$('[data-role]').forEach((cb) => (cb.onchange = async () => {
+    const role = cb.dataset.role, pageKey = cb.closest('tr').dataset.page;
+    cb.disabled = true;
+    try {
+      await db.upsert('role_page_permissions', { role, page_key: pageKey, visible: cb.checked }, 'role,page_key');
+      await loadLookups(); toast('已更新');
+    } catch (e) { toast(e.message, true); cb.checked = !cb.checked; }
+    cb.disabled = false;
+  }));
 }
 
 // 「業務權限」：通用的業務授權表（staff_permission_grants），目前只有一項
