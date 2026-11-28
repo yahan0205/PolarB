@@ -320,8 +320,24 @@ function drawNav() {
     ['synclog', '#/synclog', '同步紀錄', /^#\/synclog/],
     ['admin', '#/admin', '管理', /^#\/admin/],
   ];
-  const items = allItems.filter(([key]) => canSeePage(key)).map(([, href, label, re]) => [href, label, re]);
-  $('#nav').innerHTML = items.map(([href, label, re]) => `<a href="${href}" class="${re.test(h) ? 'on' : ''}">${label}</a>`).join('');
+  const items = allItems.filter(([key]) => canSeePage(key));
+  // 「管理」改成下拉選單：滑鼠移過去／觸碰展開，分組直接列出帳號/權限/資料庫
+  // 底下的子頁面，點了直接跳過去，不用先進管理頁面再點一次分頁。分組設定
+  // 跟管理頁面內部的分頁列共用同一份 ADMIN_GROUPS，兩邊永遠一致。
+  const navHtml = ([key, href, label, re]) => {
+    if (key !== 'admin') return `<a href="${href}" class="${re.test(h) ? 'on' : ''}">${label}</a>`;
+    const groupsHtml = ADMIN_GROUPS.map((g) => {
+      const keys = g.keys.filter((k) => k !== 'rotation' || isAdmin());
+      if (!keys.length) return '';
+      return `<div class="nav-dropdown-group"><div class="nav-dropdown-group-label">${esc(g.label)}</div>${keys.map((k) => {
+        const kLabel = k === 'rotation' ? '輪接' : ADMIN_TABS[k].label;
+        const kHref = k === 'rotation' ? '#/admin/rotation' : `#/admin/${k}`;
+        return `<a href="${kHref}">${esc(kLabel)}</a>`;
+      }).join('')}</div>`;
+    }).join('');
+    return `<span class="nav-dropdown"><a href="${href}" class="${re.test(h) ? 'on' : ''}">${label}</a><div class="nav-dropdown-menu">${groupsHtml}</div></span>`;
+  };
+  $('#nav').innerHTML = items.map(navHtml).join('');
   $('#whoami').textContent = me ? `${me.name}${me.region ? ' · ' + me.region : ''}${isDirector() ? ' · ' + (me.role === 'admin' ? '管理者' : '主任') : isArchiveClerk() ? ' · 行政' : ''}` : '';
 }
 
@@ -2574,12 +2590,32 @@ async function viewSyncLog() {
 
 /* ================= 管理 ================= */
 const ADMIN_TABS = {
+  staff: { label: '督導與帳號', table: 'staff' }, cg: { label: '居服員', table: 'caregivers' },
+  pageperm: { label: '頁面權限' }, perm: { label: '業務權限' },
   units: { label: '轉介單位', table: 'referral_units' }, nc: { label: '未成案原因', table: 'nc_reasons' },
   rj: { label: '拒絕原因', table: 'reject_reasons' }, cond: { label: '特殊條件', table: 'special_conditions' },
   sc: { label: '碼別', table: 'service_codes' },
-  cg: { label: '居服員', table: 'caregivers' }, staff: { label: '督導與帳號', table: 'staff' },
-  pageperm: { label: '頁面權限' }, perm: { label: '業務權限' },
 };
+// 管理頁面的分頁、以及頂部導覽列「管理」下拉選單，共用同一份分組設定：
+// 帳號（督導/居服員帳號管理＋輪接設定）、權限（頁面權限＋業務權限）、
+// 資料庫（各種下拉選項維護）。輪接不在 ADMIN_TABS 裡（獨立一個頁面、不是
+// 通用選項表格），刻意維持只有管理者看得到、不受頁面權限矩陣影響。
+const ADMIN_GROUPS = [
+  { label: '帳號', keys: ['staff', 'cg', 'rotation'] },
+  { label: '權限', keys: ['pageperm', 'perm'] },
+  { label: '資料庫', keys: ['units', 'nc', 'rj', 'cond', 'sc'] },
+];
+function adminTabsHtml(activeKey) {
+  return ADMIN_GROUPS.map((g) => {
+    const keys = g.keys.filter((k) => k !== 'rotation' || isAdmin());
+    if (!keys.length) return '';
+    return `<span class="admin-tab-group"><span class="admin-tab-group-label">${esc(g.label)}</span>${keys.map((k) => {
+      const label = k === 'rotation' ? '輪接' : ADMIN_TABS[k].label;
+      const href = k === 'rotation' ? '#/admin/rotation' : `#/admin/${k}`;
+      return `<a href="${href}" class="${k === activeKey ? 'on' : ''}">${esc(label)}</a>`;
+    }).join('')}</span>`;
+  }).join('');
+}
 async function viewAdmin(tab) {
   if (tab === 'rotation' && isAdmin()) return viewRotationAdmin();
   if (tab === 'pageperm') return viewPagePermAdmin();
@@ -2612,7 +2648,7 @@ async function viewAdmin(tab) {
   const canDelete = isAdmin() && (tab === 'cg' || tab === 'staff');
   $('#main').innerHTML = `
   <div class="head"><div><h1>管理</h1><div class="muted small" style="margin-top:4px">選項不刪除，不用的改成停用；停用後不會出現在下拉選單，但舊紀錄仍保留。${canDelete ? '居服員／督導如果是輸入錯誤（非離職），管理者可以直接刪除。' : ''}</div></div></div>
-  <nav class="tabs" aria-label="管理項目">${Object.entries(ADMIN_TABS).map(([k, v]) => `<a href="#/admin/${k}" class="${k === tab ? 'on' : ''}">${v.label}</a>`).join('')}${isAdmin()?'<a href="#/admin/rotation">輪接</a>':''}</nav>
+  <nav class="tabs admin-tabs" aria-label="管理項目">${adminTabsHtml(tab)}</nav>
   ${tab === 'staff' ? '<div class="card small" style="margin-bottom:16px;color:var(--ink2)">先新增人員資料並填好員編、儲存後，再用「建立帳號」設定密碼即可（登入帳號＝員編）。主任與管理者可以判定拒案、刪除紀錄、管理選項；行政僅能編輯個案清單的「結案箱年度」。</div>' : ''}
   <div class="tbox"><table class="t" style="min-width:640px">
     <thead><tr>${head}<th style="width:80px">啟用</th><th style="width:90px"></th>${canDelete ? '<th style="width:70px"></th>' : ''}</tr></thead>
@@ -2700,7 +2736,7 @@ async function viewPagePermAdmin() {
   const canEdit = isAdmin();
   $('#main').innerHTML = `
   <h1>管理</h1>
-  <nav class="tabs" aria-label="管理項目">${Object.entries(ADMIN_TABS).map(([k, v]) => `<a href="#/admin/${k}" class="${k === 'pageperm' ? 'on' : ''}">${v.label}</a>`).join('')}${isAdmin() ? '<a href="#/admin/rotation">輪接</a>' : ''}</nav>
+  <nav class="tabs admin-tabs" aria-label="管理項目">${adminTabsHtml('pageperm')}</nav>
   <div class="muted small" style="margin:10px 0 16px">設定每個角色在導覽列能不能看到、能不能進入某個頁面；頁面裡面原本的細部操作權限（例如只有管理者能刪帳號）不受這裡影響。${canEdit ? '' : '　<span style="color:var(--warn)">只有管理者能修改這份設定。</span>'}</div>
   <div class="tbox"><table class="t">
     <thead><tr><th>頁面</th>${PAGE_PERM_ROLES.map(([, l]) => `<th>${l}</th>`).join('')}</tr></thead>
@@ -2737,7 +2773,7 @@ async function viewBusinessPermAdmin() {
   const canEdit = isAdmin();
   $('#main').innerHTML = `
   <h1>管理</h1>
-  <nav class="tabs" aria-label="管理項目">${Object.entries(ADMIN_TABS).map(([k, v]) => `<a href="#/admin/${k}" class="${k === 'perm' ? 'on' : ''}">${v.label}</a>`).join('')}${isAdmin() ? '<a href="#/admin/rotation">輪接</a>' : ''}</nav>
+  <nav class="tabs admin-tabs" aria-label="管理項目">${adminTabsHtml('perm')}</nav>
   <div class="muted small" style="margin:10px 0 16px">指派特定業務的管理權限給同仁，不分區域限制；主任與管理者不受此表限制，一律可操作全部業務。${canEdit ? '' : '　<span style="color:var(--warn)">只有管理者能修改這份授權清單。</span>'}</div>
   <div class="tbox"><table class="t">
     <thead><tr><th>員編</th><th>姓名</th><th>角色</th>${BUSINESS_PERMISSIONS.map((p) => `<th>${esc(p.label)}</th>`).join('')}</tr></thead>
