@@ -2605,10 +2605,17 @@ async function viewAdmin(tab) {
       b.code = $('[name=code]', tr).value.trim() || null; b.region = $('[name=region]', tr).value || null;
       b.hire_date = $('[name=hire_date]', tr).value || null; b.resign_date = $('[name=resign_date]', tr).value || null;
       b.lead_supervisor_staff_id = Number($('[name=lead_supervisor_staff_id]', tr).value) || null;
+      // 填了離職日就自動連動停用，不用另外再去勾「啟用」——避免忘記同步兩個欄位，
+      // 導致個督檢核等其他功能看到的在職狀態不一致。反過來（取消「啟用」）不會
+      // 自動帶入離職日，因為停用常常是事後才補登，當下日期不一定是真正的離職日。
+      if (b.resign_date) b.active = false;
     }
     if (tab === 'staff') { b.code = $('[name=code]', tr).value.trim() || null; b.region = $('[name=region]', tr).value || null; b.role = $('[name=role]', tr).value; }
     return b;
   };
+  if (tab === 'cg') $$('[name=resign_date]').forEach((input) => (input.oninput = () => {
+    if (input.value) { const tr = input.closest('tr'); const activeCb = $('[name=active]', tr); if (activeCb) activeCb.checked = false; }
+  }));
   $$('[data-save]').forEach((btn) => (btn.onclick = async () => {
     const tr = btn.closest('tr'); const b = read(tr);
     if (!b.name) { toast('名稱不能空白', true); return; }
