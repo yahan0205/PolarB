@@ -2956,8 +2956,13 @@ async function viewCaregiverAuditList() {
       // 照員編排序，點表頭可以切換遞增/遞減（不受 L.cg 原本的載入順序影響）。
       .sort((a, b) => dir * (a.code || '').localeCompare(b.code || '', undefined, { numeric: true }));
     const sortIcon = cgAuditState.codeSort === 'asc' ? '▲' : '▼';
+    // 「新增紀錄」開放在列表頁直接點，不用先點進某個人的頁面——選單裡只列出
+    // 自己有權限編輯的居服員（跟點進個人頁面後能不能新增的權限判斷一致），
+    // 離職的也列進去（可能是要補記離職前的事項），不受上面「顯示離職」篩選器影響。
+    const editableCgs = L.cg.filter(canEditCgAudit);
     $('#main').innerHTML = `
-    <div class="head"><div><h1>居服員稽核</h1><div class="muted small" style="margin-top:4px">紀錄每位居服員每年度的優良事項／改善事項，督導只能編輯自己負責區域的居服員。</div></div></div>
+    <div class="head"><div><h1>居服員稽核</h1><div class="muted small" style="margin-top:4px">紀錄每位居服員每年度的優良事項／改善事項，督導只能編輯自己負責區域的居服員。</div></div>
+      <div class="right">${editableCgs.length ? '<button type="button" class="btn primary" id="cgaListNew">＋ 新增紀錄</button>' : ''}</div></div>
     <div class="card filters">
       <div class="seg" role="group" aria-label="區域">${['全部', ...REGIONS].map((r) => `<button type="button" data-region="${r}" class="${cgAuditState.region === r ? 'on' : ''}">${r}</button>`).join('')}</div>
       <label class="inline-check"><input type="checkbox" id="cgaShowInactive" ${cgAuditState.showInactive ? 'checked' : ''}>顯示離職</label>
@@ -2978,8 +2983,34 @@ async function viewCaregiverAuditList() {
     $('#cgaQ').oninput = (e) => { cgAuditState.q = e.target.value; draw(); };
     $('#th-cgacode').onclick = () => { cgAuditState.codeSort = cgAuditState.codeSort === 'asc' ? 'desc' : 'asc'; draw(); };
     $$('tr.click').forEach((tr) => (tr.onclick = () => { location.hash = `#/cgaudit/${tr.dataset.id}`; }));
+    $('#cgaListNew')?.addEventListener('click', () => openCgAuditPicker(editableCgs));
   };
   draw();
+}
+
+// 列表頁的「新增紀錄」：先選居服員（文字輸入＋自動比對，跟媒合紀錄的居服員
+// 欄位同一套模式），選定後開啟跟個人頁面一樣的 openCgAuditEditor()，新增完
+// 直接導到那個人的頁面，方便接著看結果或繼續新增下一筆。
+function openCgAuditPicker(editableCgs) {
+  const cgLabel = (c) => `${c.code ? `${c.code} ` : ''}${c.name}${c.region ? `（${c.region}）` : ''}${c.active ? '' : '　離職'}`;
+  modal(`<h2>新增紀錄：選擇居服員</h2>
+    <div class="stack">
+      <label class="f">居服員 <span class="req">*</span><input type="text" name="cg_name" list="cga-picklist" autocomplete="off" placeholder="輸入姓名或員編搜尋">
+        <datalist id="cga-picklist">${editableCgs.map((c) => `<option value="${esc(cgLabel(c))}">`).join('')}</datalist></label>
+      <p class="err-text" id="cgaperr" hidden></p>
+    </div>
+    <div class="acts"><button type="button" class="btn" data-no>取消</button><button type="button" class="btn primary" data-yes>下一步</button></div>`,
+  (m, close) => {
+    $('[data-no]', m).onclick = close;
+    $('[data-yes]', m).onclick = () => {
+      const byLabel = new Map(editableCgs.map((c) => [cgLabel(c), c]));
+      const cg = byLabel.get($('[name=cg_name]', m).value.trim());
+      const er = $('#cgaperr', m);
+      if (!cg) { er.textContent = '請從建議選單選擇一位居服員'; er.hidden = false; return; }
+      close();
+      openCgAuditEditor(cg, null, () => { location.hash = `#/cgaudit/${cg.id}`; });
+    };
+  });
 }
 
 async function viewCaregiverAuditDetail(cgId) {
