@@ -1446,6 +1446,53 @@ function resolveEffectiveVisitRecords(visits, batches) {
   return visits.filter((v) => monthOwner.get(v.visit_month) === v.import_id);
 }
 
+// 家電訪稽核結果的共用快取（見 sql/25_visit_audit_cache.sql）：訪視紀錄一天只會
+// 同步一次（或主任手動匯入時才變），同一天不管誰、開幾次頁面，算出來的結果都
+// 一樣，不用每次都重抓全部 rk_visits、重算一次——改成先比對「這次的輸入特徵」
+// 跟資料庫裡存的 signature 是否相同，一樣就直接用快取的算好結果，不一樣（有
+// 新匯入訪視紀錄，或個案清單有異動——新增案件/案件結案等）才重算並寫回快取。
+const VISIT_AUDIT_CACHE_ID = 1;
+// signature 只需要「便宜就能算出來」的特徵，不需要完美：latestImport（最新一批
+// 訪視紀錄匯入的 id+時間）涵蓋「有沒有新匯入訪視紀錄」；roster 筆數、結案筆數、
+// 最大 id 涵蓋「個案清單有沒有新增/結案異動」。casesByNid 已經是個案清單本身
+// 的資料，不用再額外查詢。
+function computeAuditSignature(roster, visitBatches) {
+  const latest = visitBatches[0];
+  const closedCount = roster.filter((c) => c.status === '結案').length;
+  const maxId = roster.reduce((m, c) => (c.id > m ? c.id : m), 0);
+  return [latest?.id ?? 'none', latest?.imported_at ?? '', roster.length, closedCount, maxId].join('|');
+}
+
+async function getCachedOrComputeAudit(casesByNid, roster, visitBatches, todayMonth) {
+  if (!visitBatches.length) return EMPTY_AUDIT;
+  const signature = computeAuditSignature(roster, visitBatches);
+  try {
+    const rows = await db.all('visit_audit_cache', { id: `eq.${VISIT_AUDIT_CACHE_ID}`, select: 'signature,payload' });
+    const cached = rows[0];
+    if (cached && cached.signature === signature) {
+      const p = cached.payload;
+      return { results: new Map(p.results), logMinMonth: p.logMinMonth, logMaxMonth: p.logMaxMonth, excludedCount: p.excludedCount };
+    }
+  } catch { /* 快取表還沒建好，或讀取失敗，都直接往下重新計算，不擋畫面 */ }
+
+  // 快取沒命中（第一次用、或輸入特徵變了）：照舊抓全部訪視紀錄、重算一次。
+  const allVisits = await db.all('rk_visits', { select: RK_VISITS_AUDIT_FIELDS });
+  const effective = resolveEffectiveVisitRecords(allVisits, visitBatches);
+  const logMonths = effective.map((r) => r.visit_month);
+  const asOfMonth = logMonths.length ? [...logMonths, todayMonth].reduce((a, b) => (a > b ? a : b)) : todayMonth;
+  const audit = effective.length ? auditCases(casesByNid, effective, asOfMonth) : EMPTY_AUDIT;
+
+  // 背景把算好的結果寫回共用快取，失敗也沒關係（下次還是會重算，不影響這次
+  // 畫面顯示），不要讓寫入動作擋住使用者看結果。
+  db.upsert('visit_audit_cache', {
+    id: VISIT_AUDIT_CACHE_ID, signature,
+    payload: { results: [...audit.results], logMinMonth: audit.logMinMonth, logMaxMonth: audit.logMaxMonth, excludedCount: audit.excludedCount },
+    computed_at: new Date().toISOString(),
+  }, 'id').catch(() => {});
+
+  return audit;
+}
+
 // 忠實搬自 audit_engine.py 的 audit()：電訪每月、家訪每 3 個月（可提前、提前後
 // 重新起算）各自獨立判定，內容需 >30 字才算合格，casesByNid（現在來自「個案清單」
 // case_roster）是名單造冊標準。
@@ -1614,18 +1661,14 @@ async function loadVisitAudit() {
     db.all('rk_visit_imports', { order: 'imported_at.desc' }),
   ]);
   if (!roster.length || !visitBatches.length) return null;
-  // 稽核只看這幾個欄位（見 resolveEffectiveVisitRecords/auditCases），content 這種長文字內容欄位
-  // 完全沒用到卻佔了絕大部分資料量，用 select 只抓需要的欄位可以大幅縮小下載量、加快載入。
-  const allVisits = await db.all('rk_visits', { select: RK_VISITS_AUDIT_FIELDS });
-  const effective = resolveEffectiveVisitRecords(allVisits, visitBatches);
   // 同一身分證字號可能有多筆 case_roster（結案後重新開案），收集成陣列而不是
   // 直接覆蓋，不然舊案子會憑空消失、新舊案子的訪視紀錄也會混在一起算。
   const casesByNid = new Map();
   for (const c of roster) { if (!c.national_id) continue; if (!casesByNid.has(c.national_id)) casesByNid.set(c.national_id, []); casesByNid.get(c.national_id).push(c); }
   const todayMonth = `${new Date().getFullYear()}-${String(new Date().getMonth() + 1).padStart(2, '0')}`;
-  const logMonths = effective.map((r) => r.visit_month);
-  const asOfMonth = logMonths.length ? [...logMonths, todayMonth].reduce((a, b) => (a > b ? a : b)) : todayMonth;
-  return auditCases(casesByNid, effective, asOfMonth);
+  // 改用共用快取（見 sql/25_visit_audit_cache.sql）：同一天內大家開頁面看到的
+  // 都是同一份算好的結果，不用每個人每次都重抓全部 rk_visits、重算一次。
+  return getCachedOrComputeAudit(casesByNid, roster, visitBatches, todayMonth);
 }
 
 async function drawCcVisits(box) {
@@ -1650,7 +1693,13 @@ async function drawVisitList(box, audit) {
       else if (st.家訪 === '逾期') allItems.push({ r, m, type: '家訪逾期' });
     }
   }
-  const owners = [...new Set(allItems.map((i) => i.r.owner))].sort();
+  // 下拉選單改成直接帶入人員名單裡「實際會列管個案的人」，不要只從「目前有缺漏的
+  // 項目」裡反推——不然剛好這個月沒有任何缺漏的督導會從選單裡消失，看起來像選單
+  // 沒更新。用「有沒有設定區域」判斷，不是單純用 role：有些管理者（例如陳冠文、
+  // 邱羿綺）身兼某個區域的督導工作、也會是案件的主責督導，role 是 admin 但一樣有
+  // 列管個案；真正的總部主任/管理者（region 是空的）跟系統同步帳號、測試帳號則都
+  // 沒有設定區域，正好排除掉。用 L.staff 本來就依角色/員編排好的順序，不用再額外排序。
+  const owners = L.staff.filter((s) => s.active && s.role !== 'clerk' && s.region).map((s) => s.name);
   const items = visitListState.owner === '全部' ? allItems : allItems.filter((i) => i.r.owner === visitListState.owner);
   const dir = visitListState.sortDir === 'desc' ? -1 : 1;
   items.sort((a, b) => dir * a.m.localeCompare(b.m) || a.r.owner.localeCompare(b.r.owner) || a.r.name.localeCompare(b.r.name));
@@ -1862,12 +1911,9 @@ async function loadCaseRosterBase() {
 }
 
 async function loadCaseAudit(base) {
-  const { casesByNid, visitBatches, todayMonth } = base;
-  const allVisits = visitBatches.length ? await db.all('rk_visits', { select: RK_VISITS_AUDIT_FIELDS }) : [];
-  const effective = resolveEffectiveVisitRecords(allVisits, visitBatches);
-  const logMonths = effective.map((r) => r.visit_month);
-  const asOfMonth = logMonths.length ? [...logMonths, todayMonth].reduce((a, b) => (a > b ? a : b)) : todayMonth;
-  return effective.length ? auditCases(casesByNid, effective, asOfMonth) : EMPTY_AUDIT;
+  const { casesByNid, roster, visitBatches, todayMonth } = base;
+  // 改用共用快取（見 sql/25_visit_audit_cache.sql），理由同 loadVisitAudit()。
+  return getCachedOrComputeAudit(casesByNid, roster, visitBatches, todayMonth);
 }
 
 async function viewCases() {
