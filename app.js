@@ -2646,9 +2646,18 @@ async function viewAdmin(tab) {
   // 能真的刪掉。如果這個人其實已經被媒合紀錄/問案等資料引用，資料庫會因為外鍵限制擋下
   // 刪除、跳出錯誤訊息，不會真的刪出資料不一致。
   const canDelete = isAdmin() && (tab === 'cg' || tab === 'staff');
+  // 人數動態儀表板：直接用這次已經撈回來的 rows 現場算，不用另外查資料庫或做
+  // 快取——居服員＋督導加起來才一百人左右，這種分組計數本來就是毫秒等級的
+  // 運算，開快取反而多一層要維護的架構，沒有實益。
+  const regionDashboard = (tab === 'cg' || tab === 'staff')
+    ? `<div class="card" style="margin-bottom:16px"><div style="display:flex;flex-wrap:wrap;gap:16px 40px">
+        <div><div class="small muted">在職總人數</div><div style="font-size:26px;font-weight:700">${rows.filter((r) => r.active).length}</div></div>
+        ${REGIONS.map((reg) => `<div><div class="small muted">${esc(reg)}</div><div style="font-size:26px;font-weight:700">${rows.filter((r) => r.active && r.region === reg).length}</div></div>`).join('')}
+      </div></div>` : '';
   $('#main').innerHTML = `
   <div class="head"><div><h1>管理</h1><div class="muted small" style="margin-top:4px">選項不刪除，不用的改成停用；停用後不會出現在下拉選單，但舊紀錄仍保留。${canDelete ? '居服員／督導如果是輸入錯誤（非離職），管理者可以直接刪除。' : ''}</div></div></div>
   <nav class="tabs admin-tabs" aria-label="管理項目">${adminTabsHtml(tab)}</nav>
+  ${regionDashboard}
   ${tab === 'staff' ? '<div class="card small" style="margin-bottom:16px;color:var(--ink2)">先新增人員資料並填好員編、儲存後，再用「建立帳號」設定密碼即可（登入帳號＝員編）。主任與管理者可以判定拒案、刪除紀錄、管理選項；行政僅能編輯個案清單的「結案箱年度」。</div>' : ''}
   <div class="tbox"><table class="t" style="min-width:640px">
     <thead><tr>${head}<th style="width:80px">啟用</th><th style="width:90px"></th>${canDelete ? '<th style="width:70px"></th>' : ''}</tr></thead>
@@ -3337,7 +3346,7 @@ function cgSupStats(cg, doneRows) {
   return { total, completed, overdue, dueNow, ok: overdue === 0, lastDone, paperDue };
 }
 
-let cgSupState = { region: null, status: 'all', supervisor: '全部', onlyPaperDue: false, q: '' };
+let cgSupState = { region: null, status: 'all', supervisor: '全部', onlyPaperDue: false, showResigned: false, q: '' };
 const canRecordCgSup = (cg) => canEditCgAudit(cg);
 const canCheckCgSupPaper = () => hasPerm('cg_supervision_paper_check');
 
@@ -3353,7 +3362,7 @@ async function viewCgSupervisionList() {
   const draw = () => {
     const q = cgSupState.q.trim().toLowerCase();
     const rows = L.cg.filter((c) => (cgSupState.region === '全部' || c.region === cgSupState.region)
-      && (cgSupState.status === 'resigned' ? Boolean(c.resign_date) : !c.resign_date)
+      && (cgSupState.showResigned || !c.resign_date)
       && (cgSupState.supervisor === '全部' || L.staffById[c.lead_supervisor_staff_id]?.name === cgSupState.supervisor)
       && (!q || c.name.toLowerCase().includes(q) || (c.code || '').toLowerCase().includes(q)))
       .map((c) => ({ c, stats: cgSupStats(c, byCg.get(c.id) || []) }))
@@ -3383,9 +3392,10 @@ async function viewCgSupervisionList() {
     <div class="card filters">
       <div class="seg" role="group" aria-label="區域">${['全部', ...REGIONS].map((r) => `<button type="button" data-cgsregion="${r}" class="${cgSupState.region === r ? 'on' : ''}">${r}</button>`).join('')}</div>
       <div class="pills">
-        ${[['all', '全部'], ['overdue', '⚠ 有逾期'], ['due', '📅 本月應辦'], ['ok', '✓ 符合規定'], ['resigned', '離職']].map(([k, l]) => `<button type="button" data-cgsstatus="${k}" class="${cgSupState.status === k ? 'on' : ''}">${l}</button>`).join('')}
+        ${[['all', '全部'], ['overdue', '⚠ 有逾期'], ['due', '📅 本月應辦'], ['ok', '✓ 符合規定']].map(([k, l]) => `<button type="button" data-cgsstatus="${k}" class="${cgSupState.status === k ? 'on' : ''}">${l}</button>`).join('')}
       </div>
       <select id="cgsSupSel"><option value="全部">全部主責居督</option>${supervisors.map((s) => opt(s, s, cgSupState.supervisor)).join('')}</select>
+      <label class="inline-check"><input type="checkbox" id="cgsShowResigned" ${cgSupState.showResigned ? 'checked' : ''}>顯示離職</label>
       <label class="inline-check"><input type="checkbox" id="cgsPaperDue" ${cgSupState.onlyPaperDue ? 'checked' : ''}>只顯示紙本未繳${totalPaperDue ? ` <span class="st" style="background:var(--bad-bg);color:var(--bad)">${totalPaperDue}</span>` : ''}</label>
       <input type="search" class="grow" id="cgsQ" placeholder="搜尋姓名、員編" value="${esc(cgSupState.q)}">
     </div>
@@ -3412,6 +3422,7 @@ async function viewCgSupervisionList() {
     $$('[data-cgsregion]').forEach((b) => (b.onclick = () => { cgSupState.region = b.dataset.cgsregion; draw(); }));
     $$('[data-cgsstatus]').forEach((b) => (b.onclick = () => { cgSupState.status = b.dataset.cgsstatus; draw(); }));
     $('#cgsSupSel').onchange = (e) => { cgSupState.supervisor = e.target.value; draw(); };
+    $('#cgsShowResigned').onchange = (e) => { cgSupState.showResigned = e.target.checked; draw(); };
     $('#cgsPaperDue').onchange = (e) => { cgSupState.onlyPaperDue = e.target.checked; draw(); };
     $('#cgsQ').oninput = (e) => { cgSupState.q = e.target.value; draw(); };
     $$('tr.click').forEach((tr) => (tr.onclick = () => { location.hash = `#/cgsup/${tr.dataset.id}`; }));
